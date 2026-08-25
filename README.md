@@ -151,6 +151,11 @@ hand.
 First full release. See the feature list above. The codename nods to the namesake
 check: SPAN double-capture makes every frame show up twice.
 
+## Design manifest
+
+The principles PicoCap is built on — inherited from the APEX.ai manifest, listing
+only what is actually implemented here — are in [MANIFEST.md](MANIFEST.md).
+
 ## License
 
 [MIT](LICENSE) © 2026 Herbert Dirnberger
