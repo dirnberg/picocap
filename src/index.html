@@ -1,0 +1,373 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PicoCap</title>
+<style>
+:root{
+ --bg:#05080d;--panel:rgba(14,22,32,.72);--panel2:rgba(0,0,0,.28);--line:#17303a;
+ --fg:#dbe9ef;--mut:#5f7d8c;--cy:#19e0d8;
+ --ok:#2ff09a;--warn:#ffb23e;--bad:#ff4d64;
+ --uni:#19e0d8;--multi:#8a7bff;--broad:#ffb23e;
+}
+*{box-sizing:border-box}
+body{margin:0;color:var(--fg);font:14px/1.55 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+ background:radial-gradient(1200px 600px at 50% -10%,rgba(25,224,216,.10),transparent 60%),
+   radial-gradient(900px 500px at 90% 120%,rgba(138,123,255,.07),transparent 60%),var(--bg);
+ background-attachment:fixed;min-height:100vh;padding:22px 16px;display:flex;flex-direction:column;align-items:center}
+body::before{content:"";position:fixed;inset:0;pointer-events:none;z-index:0;opacity:.35;
+ background-image:linear-gradient(rgba(25,224,216,.05) 1px,transparent 1px),linear-gradient(90deg,rgba(25,224,216,.05) 1px,transparent 1px);
+ background-size:34px 34px;mask:radial-gradient(circle at 50% 20%,#000,transparent 80%)}
+.wrap{position:relative;z-index:1;width:100%;max-width:660px}
+.brand{display:flex;align-items:center;gap:12px;margin:2px 2px 14px}
+.logo{width:34px;height:34px;filter:drop-shadow(0 0 8px rgba(25,224,216,.55))}
+.brand h1{margin:0;font-size:17px;letter-spacing:3px;font-weight:700}.brand h1 b{color:var(--cy)}
+.brand .tag{margin:1px 0 0;font-size:10.5px;letter-spacing:2.5px;text-transform:uppercase;color:var(--mut)}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:16px;backdrop-filter:blur(6px);
+ box-shadow:0 24px 60px -30px rgba(0,0,0,.8)}
+.drop{padding:16px;text-align:center;cursor:pointer;border-radius:14px;border:1px dashed #244a56;
+ background:linear-gradient(180deg,rgba(25,224,216,.03),transparent);transition:.18s;margin-bottom:16px}
+.drop:hover,.drop.hot{border-color:var(--cy);background:linear-gradient(180deg,rgba(25,224,216,.10),transparent);box-shadow:inset 0 0 40px rgba(25,224,216,.08)}
+.drop .big{font-weight:600}.drop .big em{color:var(--cy);font-style:normal}
+.drop small{display:block;margin-top:5px;color:var(--mut)}
+.drop.hot .big::after{content:" — release to scan";color:var(--cy)}
+.drop.mini{padding:9px 14px;margin-bottom:14px}
+.drop.mini .big{font-size:12.5px}
+.drop.mini small{display:none}
+
+.main{display:flex;flex-direction:column;gap:16px}
+.pane{padding:14px 16px}
+
+/* file list */
+#filelist{display:none}
+#filelist.show{display:block}
+.ftab{width:100%;border-collapse:collapse;font-size:12.5px}
+.ftab th{text-align:left;color:var(--mut);font-size:9.5px;letter-spacing:1.4px;text-transform:uppercase;
+ padding:0 8px 8px;border-bottom:1px solid var(--line);font-weight:600}
+.ftab th.n{text-align:right}
+.frow{cursor:pointer;border-bottom:1px solid rgba(23,48,58,.5);transition:background .12s}
+.frow:hover{background:rgba(25,224,216,.05)}
+.frow.sel{background:rgba(25,224,216,.10);box-shadow:inset 3px 0 0 var(--cy)}
+.frow td{padding:9px 8px;vertical-align:middle}
+.frow td.n{text-align:right;font-variant-numeric:tabular-nums}
+.rdot{width:9px;height:9px;border-radius:50%;display:inline-block;box-shadow:0 0 8px currentColor}
+.fn{max-width:230px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.vd{font-weight:700;letter-spacing:.6px}
+.sumbar{display:flex;gap:14px;flex-wrap:wrap;margin:2px 2px 12px;font-size:11.5px;color:var(--mut)}
+.sumbar b{color:var(--fg)}
+
+/* detail */
+#detail{min-width:0}
+.empty{padding:60px 20px;text-align:center;color:var(--mut)}
+.dtop{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:8px}
+.dfile{font-size:13px;color:var(--fg);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.stamp{color:var(--mut);font-weight:400}
+.pdfbtn{flex:0 0 auto;cursor:pointer;border:1px solid var(--cy);background:rgba(25,224,216,.08);color:var(--cy);
+ padding:7px 14px;border-radius:9px;font:inherit;font-size:12px;font-weight:600;letter-spacing:.5px;transition:.15s}
+.pdfbtn:hover{background:rgba(25,224,216,.18);box-shadow:0 0 14px rgba(25,224,216,.2)}
+.hero{display:flex;gap:26px;align-items:center;justify-content:center;flex-wrap:wrap;padding:4px 0 2px}
+.gauge{position:relative;width:150px;height:150px;flex:0 0 auto}
+.gauge svg{transform:rotate(-90deg)}
+.gauge .track{stroke:#12222b;stroke-width:11;fill:none}
+.gauge .arc{stroke-width:11;fill:none;stroke-linecap:round;transition:stroke-dashoffset .9s cubic-bezier(.2,.8,.2,1)}
+.gauge .center{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center}
+.gauge .pct{font-size:31px;font-weight:800;line-height:1;font-variant-numeric:tabular-nums}
+.gauge .pct small{font-size:14px;opacity:.6}
+.gauge .cap{font-size:9px;letter-spacing:2.5px;text-transform:uppercase;color:var(--mut);margin-top:4px}
+.verdict{text-align:center;min-width:140px}
+.verdict .badge{display:inline-flex;align-items:center;gap:9px;padding:10px 18px;border-radius:12px;
+ font-size:19px;font-weight:800;letter-spacing:2px;border:1px solid currentColor}
+.verdict .badge .dot{width:10px;height:10px;border-radius:50%;background:currentColor;box-shadow:0 0 12px currentColor}
+.verdict .sub{margin-top:8px;font-size:12px;color:var(--mut)}
+
+.sec{margin-top:16px}
+.sec>h2{margin:0 0 9px;font-size:11px;letter-spacing:2.5px;text-transform:uppercase;color:var(--mut);display:flex;align-items:center;gap:8px}
+.sec>h2::after{content:"";flex:1;height:1px;background:var(--line)}
+.notice{display:flex;gap:12px;padding:13px 15px;border-radius:12px;margin-bottom:10px;
+ border:1px solid var(--warn);background:linear-gradient(180deg,rgba(255,178,62,.10),rgba(255,178,62,.02))}
+.notice .ic{font-size:20px}.notice h3{margin:0 0 3px;font-size:14px;color:var(--warn)}
+.notice p{margin:0;font-size:12.5px;color:#c7d6dd;line-height:1.5}
+.notice code{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--warn);opacity:.8}
+.clean{display:flex;align-items:center;gap:9px;padding:12px 15px;border-radius:12px;border:1px solid var(--line);color:var(--ok);font-size:13px;background:var(--panel2)}
+.chk{display:flex;gap:12px;align-items:flex-start;padding:8px 2px;border-bottom:1px solid rgba(23,48,58,.5)}
+.chk:last-child{border-bottom:none}
+.chk .mk{width:22px;height:22px;flex:0 0 auto;border-radius:6px;display:grid;place-items:center;font-size:13px;font-weight:800}
+.chk .lb{font-weight:600;font-size:13.5px}.chk .dt{color:var(--mut);font-size:12px;margin-top:1px}
+.mk.pass{background:rgba(47,240,154,.14);color:var(--ok)}.mk.warn{background:rgba(255,178,62,.16);color:var(--warn)}
+.mk.fail{background:rgba(255,77,100,.16);color:var(--bad)}.mk.info{background:rgba(25,224,216,.14);color:var(--cy)}
+.stack{display:flex;height:16px;border-radius:8px;overflow:hidden;border:1px solid var(--line);background:#0b141a}
+.stack i{height:100%}
+.legend{display:flex;gap:14px;flex-wrap:wrap;margin-top:10px;font-size:12px}
+.legend span{display:flex;align-items:center;gap:6px;color:var(--mut)}.legend b{color:var(--fg);font-variant-numeric:tabular-nums}
+.sw{width:10px;height:10px;border-radius:3px;display:inline-block}
+.chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
+.chip{padding:6px 11px;border-radius:20px;border:1px solid var(--line);font-size:12px;color:var(--mut);display:flex;gap:7px;align-items:center;background:var(--panel2)}
+.chip b{color:var(--fg);font-variant-numeric:tabular-nums}
+.chip.on{border-color:var(--cy);color:var(--cy);box-shadow:0 0 14px rgba(25,224,216,.15)}.chip.on b{color:var(--cy)}
+.chrow{display:flex;align-items:center;gap:10px;padding:4px 0}
+.chtrk{flex:0 0 96px;height:8px;background:#0b141a;border:1px solid var(--line);border-radius:4px;overflow:hidden}
+.chtrk i{display:block;height:100%;background:linear-gradient(90deg,var(--cy),var(--multi))}
+.chrow b{width:46px;text-align:right;font-size:11.5px;font-variant-numeric:tabular-nums}
+.chrow .chn{width:64px;text-align:right;color:var(--mut);font-size:11.5px;font-variant-numeric:tabular-nums}
+.chrow code{font-family:ui-monospace,Menlo,monospace;font-size:10.5px;color:#a9c7d1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.kv{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--line);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.kv .cell{background:#0b141a;padding:9px 12px}
+.kv .k{font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--mut)}
+.kv .v{font-size:13px;margin-top:2px;word-break:break-all;font-variant-numeric:tabular-nums}
+.file .row{display:flex;justify-content:space-between;gap:14px;padding:8px 2px;border-bottom:1px solid rgba(23,48,58,.5)}
+.file .row:last-child{border-bottom:none}
+.file .k{color:var(--mut);font-size:11px;letter-spacing:1.2px;text-transform:uppercase}
+.file .v{text-align:right;word-break:break-all;font-variant-numeric:tabular-nums}
+.mono{font-family:ui-monospace,Menlo,monospace;font-size:11.5px;color:#a9c7d1}
+.lower{margin-top:6px}
+
+/* wide: two-pane + masonry detail */
+@media (min-width:1000px){
+ .wrap{max-width:1200px}
+ .main{flex-direction:row;align-items:flex-start}
+ #filelist{flex:0 0 360px;position:sticky;top:20px;max-height:calc(100vh - 40px);overflow:auto}
+ #detail{flex:1 1 auto}
+ .lower{column-count:2;column-gap:26px}
+ .lower>.sec{break-inside:avoid;-webkit-column-break-inside:avoid;margin:0 0 16px}
+}
+@media (min-width:1560px){
+ .wrap{max-width:1520px}
+ #filelist{flex-basis:400px}
+ .lower{column-count:3}
+}
+
+</style></head>
+<body>
+<div class="wrap">
+ <div class="brand">
+  <svg class="logo" viewBox="0 0 40 40" fill="none">
+   <circle cx="20" cy="20" r="16" stroke="#19e0d8" stroke-width="2"/>
+   <circle cx="20" cy="20" r="8" stroke="#19e0d8" stroke-width="2" opacity=".5"/>
+   <circle cx="20" cy="20" r="2.5" fill="#19e0d8"/>
+   <path d="M20 1v6M20 33v6M1 20h6M33 20h6" stroke="#19e0d8" stroke-width="2"/>
+  </svg>
+  <div><h1>PICO<b>CAP</b></h1><p class="tag">Capture Intake Check · v1.0 “Groundhog”</p></div>
+ </div>
+
+ <div class="drop" id="drop">
+  <div class="big">Drop one or more captures <em>or click to select</em></div>
+  <small>.pcap · .pcapng — checked locally, nothing is uploaded elsewhere · multiple files supported</small>
+  <input id="file" type="file" accept=".pcap,.pcapng,.cap" multiple hidden>
+ </div>
+
+ <div class="main">
+  <div class="card pane" id="filelist">
+   <div class="sumbar" id="sumbar"></div>
+   <div id="ftab"></div>
+  </div>
+  <div class="card pane" id="detail">
+   <div class="empty">Drop a capture to see its full report here.</div>
+  </div>
+ </div>
+</div>
+
+<script>
+const $=id=>document.getElementById(id);
+const drop=$('drop'),file=$('file');
+const CIRC=2*Math.PI*74;
+const css=v=>getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+let results=[], selected=null, uidSeq=0;
+
+['dragover','dragenter'].forEach(e=>drop.addEventListener(e,ev=>{ev.preventDefault();drop.classList.add('hot')}));
+['dragleave','drop'].forEach(e=>drop.addEventListener(e,ev=>{ev.preventDefault();drop.classList.remove('hot')}));
+drop.addEventListener('click',()=>file.click());
+drop.addEventListener('drop',ev=>{if(ev.dataTransfer.files.length)addFiles(ev.dataTransfer.files)});
+file.addEventListener('change',()=>{if(file.files.length)addFiles(file.files)});
+
+const N=n=>Number(n).toLocaleString();
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+function human(n){if(n<1024)return n+' B';const u=['KB','MB','GB','TB'];let i=-1;do{n/=1024;i++}while(n>=1024&&i<3);return n.toFixed(1)+' '+u[i]}
+function fmtDur(s){s=Math.round(s);return s<60?s+'s':s<3600?Math.floor(s/60)+'m '+(s%60)+'s':Math.floor(s/3600)+'h '+Math.floor(s%3600/60)+'m'}
+const verdictColor=v=>v==='ACCEPT'?css('--ok'):v==='REVIEW'?css('--warn'):css('--bad');
+const integrityColor=s=>s>=99.9?css('--ok'):s>=50?css('--warn'):css('--bad');
+const byUid=u=>results.find(r=>r.uid===u);
+
+// only distinct SHA-256 shown; identical re-loads collapse onto the first
+function uniqueResults(){
+ const seen=new Set(),out=[];
+ for(const r of results){
+  if(r.scanning||r.err){out.push(r);continue}
+  if(seen.has(r.d.sha256))continue;
+  seen.add(r.d.sha256);out.push(r);
+ }
+ return out;
+}
+
+async function addFiles(list){
+ const added=[...list].map(f=>({uid:uidSeq++,name:f.name,size:f.size,file:f,scanning:true}));
+ results.push(...added);
+ $('filelist').classList.add('show');
+ drop.classList.add('mini');
+ if(selected===null)selected=added[0].uid;
+ renderList();renderDetail();
+ for(const res of added){await analyseOne(res)}
+}
+
+async function analyseOne(res){
+ const fd=new FormData();fd.append('file',res.file);
+ try{
+  const r=await fetch('/check',{method:'POST',body:fd});
+  if(!r.ok){res.err=r.status===413?'File exceeds the upload size limit.':r.status>=500?'The checker hit an error reading this file.':'Server rejected the file (HTTP '+r.status+').';}
+  else{res.d=await r.json();res.when=new Date();}
+ }catch(e){res.err='Could not reach the checker ('+e.message+').';}
+ res.scanning=false;res.file=null;
+ // collapse duplicate hash: if selected points at a hidden duplicate, jump to the kept one
+ if(res.d){
+  const first=results.find(o=>o.d&&o.uid!==res.uid&&o.d.sha256===res.d.sha256&&results.indexOf(o)<results.indexOf(res));
+  if(first&&selected===res.uid)selected=first.uid;
+ }
+ renderList();renderDetail();
+}
+
+function selectRow(u){selected=u;renderList();renderDetail();$('detail').scrollIntoView({behavior:'smooth',block:'start'})}
+
+function renderList(){
+ const view=uniqueResults();
+ const done=view.filter(r=>r.d);
+ const counts={ACCEPT:0,REVIEW:0,REJECT:0};done.forEach(r=>counts[r.d.intake]++);
+ const nErr=view.filter(r=>r.err).length;
+ const last=results.filter(r=>r.when).map(r=>r.when).sort((a,b)=>b-a)[0];
+ $('sumbar').innerHTML=`<span><b>${view.length}</b> file(s)</span>`
+  +`<span style="color:${css('--ok')}">● <b>${counts.ACCEPT}</b> accept</span>`
+  +`<span style="color:${css('--warn')}">● <b>${counts.REVIEW}</b> review</span>`
+  +`<span style="color:${css('--bad')}">● <b>${counts.REJECT+nErr}</b> reject</span>`
+  +(last?`<span>last analysed <b>${last.toLocaleTimeString()}</b></span>`:'');
+ const rows=view.map(res=>{
+  let dot,verd,integ='',pkts='',dup='';
+  if(res.scanning){dot=css('--cy');verd='analysing'}
+  else if(res.err){dot=css('--bad');verd='ERR'}
+  else{const d=res.d;dot=verdictColor(d.intake);verd=d.intake;integ=d.conformance.toFixed(0)+'%';pkts=N(d.packets);dup=d.dist.dup_pct>=1?d.dist.dup_pct.toFixed(0)+'%':'–'}
+  const warn=res.d&&res.d.notices.length?' ⚠':'';
+  return `<tr class="frow${res.uid===selected?' sel':''}" onclick="selectRow(${res.uid})">
+   <td><span class="rdot" style="color:${dot};background:${dot}"></span></td>
+   <td class="fn" title="${esc(res.name)}">${esc(res.name)}${warn}</td>
+   <td class="vd" style="color:${dot}">${verd}</td>
+   <td class="n">${integ}</td><td class="n">${pkts}</td><td class="n">${dup}</td></tr>`;
+ }).join('');
+ $('ftab').innerHTML=`<table class="ftab"><thead><tr><th></th><th>File</th><th>Intake</th>
+   <th class="n">Conf</th><th class="n">Packets</th><th class="n">Dup</th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+function renderDetail(){
+ const c=$('detail');
+ const res=selected===null?null:byUid(selected);
+ if(!res){c.innerHTML='<div class="empty">Drop a capture to see its full report here.</div>';return}
+ if(res.scanning){c.innerHTML=`<div class="empty">Analysing <b>${esc(res.name)}</b> (${human(res.size)}) …</div>`;return}
+ if(res.err){c.innerHTML=`<div class="sec"><h2>Not loadable</h2>
+   <div class="notice" style="border-color:${css('--bad')};background:rgba(255,77,100,.08)">
+   <div class="ic">✕</div><div><h3 style="color:${css('--bad')}">${esc(res.name)}</h3><p>${esc(res.err)}</p></div></div></div>`;return}
+ c.innerHTML=detailHTML(res.d,res.when);
+ const arc=c.querySelector('.arc');if(arc){const off=arc.getAttribute('data-off');arc.style.strokeDashoffset=CIRC;requestAnimationFrame(()=>requestAnimationFrame(()=>arc.style.strokeDashoffset=off))}
+}
+
+function detailHTML(d,when){
+ const icol=integrityColor(d.conformance),vcol=verdictColor(d.intake);
+ const subs={ACCEPT:'Meets the collection criteria',REVIEW:'Usable — see notices below',REJECT:'Do not use — fix and recapture'};
+ const off=CIRC*(1-d.conformance/100);
+ const mk={pass:'✓',warn:'!',fail:'✕',info:'i'};
+ const notices=(d.notices&&d.notices.length)
+  ?d.notices.map(n=>`<div class="notice"><div class="ic">⚠</div><div><h3>${esc(n.title)} <code>${esc(n.code)}</code></h3><p>${esc(n.text)}</p></div></div>`).join('')
+  :`<div class="clean">✓ No capture-quality notices — traffic looks clean</div>`;
+ const checks=d.checks.map(c=>`<div class="chk"><div class="mk ${c.level}">${mk[c.level]||'i'}</div><div><div class="lb">${esc(c.label)}</div><div class="dt">${esc(c.detail)}</div></div></div>`).join('');
+ const x=d.dist,cast=(x.unicast+x.multicast+x.broadcast)||1;
+ const seg=[['var(--uni)',x.unicast,'Unicast'],['var(--multi)',x.multicast,'Multicast'],['var(--broad)',x.broadcast,'Broadcast']];
+ const stack=seg.map(([c,v])=>`<i style="width:${v/cast*100}%;background:${c}"></i>`).join('');
+ const legend=seg.map(([c,v,l])=>`<span><span class="sw" style="background:${c}"></span>${l} <b>${N(v)}</b></span>`).join('')
+  +[['IPv4',x.ipv4],['IPv6',x.ipv6],['ARP',x.arp]].map(([l,v])=>`<span><span class="sw" style="background:#3a5561"></span>${l} <b>${N(v)}</b></span>`).join('');
+ const enc=[['GRE',x.gre],['ERSPAN',x.erspan],['VXLAN',x.vxlan],['Geneve',x.geneve],['VLAN',x.vlan],['QinQ',x.qinq],['multi-encap',x.multi_encap]].map(([l,v])=>`<div class="chip ${v>0?'on':''}">${l} <b>${N(v)}</b></div>`).join('');
+ const chHTML=(d.chains&&d.chains.length)?(function(){const mx=Math.max.apply(null,d.chains.map(c=>c.pct));return d.chains.slice(0,10).map(c=>`<div class="chrow"><div class="chtrk"><i style="width:${Math.max(3,c.pct/mx*100)}%"></i></div><b>${c.pct.toFixed(1)}%</b><span class="chn">${N(c.count)}</span><code title="${esc(c.chain)}">${esc(c.chain)}</code></div>`).join('')})():'<div style="color:var(--mut);font-size:12px">No decodable Layer-2 chains.</div>';
+ const m=d.meta,rate=m.rate_bps>0?(m.rate_bps/1e6).toFixed(2)+' Mbit/s':'–';
+ const cells=[['Recorded start',m.start],['Recorded end',m.end],['Duration',m.duration_h>0?fmtDur(m.duration_h):'–'],['Throughput',rate],
+  ['pcap version',m.ver],['Byte order',m.endian],['Timestamp precision',m.ts_prec],['Link type',m.linktype],
+  ['Snap length',m.snaplen==0?'unlimited':N(m.snaplen)+' B'],['Interfaces',m.ifaces],['Avg packet',m.avg_pkt+' B'],['On-wire',human(m.wire_bytes)]];
+ const meta=cells.map(([k,v])=>`<div class="cell"><div class="k">${k}</div><div class="v">${esc(v)}</div></div>`).join('');
+ const frows=[['Name',d.name],['Format',d.format.toUpperCase()],['Packets',N(d.packets)],['Size',human(d.total)],['Endpoints',N(d.src_macs)+' MAC · '+N(d.ip_addrs)+' IP']]
+  .map(([k,v])=>`<div class="row"><span class="k">${k}</span><span class="v">${esc(v)}</span></div>`).join('')
+  +`<div class="row"><span class="k">SHA-256</span><span class="v mono">${d.sha256}</span></div>`;
+ const stamp=when?'last analysed '+when.toLocaleString():'';
+ return `
+  <div class="dtop"><div class="dfile" title="${esc(d.name)}">${esc(d.name)}<span class="stamp"> · ${stamp}</span></div><button class="pdfbtn" onclick="exportMD()">⤓ Report .md</button></div>
+  <div class="hero">
+   <div class="gauge"><svg width="150" height="150" viewBox="0 0 170 170">
+     <circle class="track" cx="85" cy="85" r="74"></circle>
+     <circle class="arc" cx="85" cy="85" r="74" data-off="${off}" style="stroke:${icol};stroke-dasharray:${CIRC};stroke-dashoffset:${off};filter:drop-shadow(0 0 10px ${icol})"></circle>
+    </svg><div class="center"><div class="pct" style="color:${icol}">${d.conformance.toFixed(1)}<small>%</small></div><div class="cap">Conformance</div></div></div>
+   <div class="verdict"><div class="badge" style="color:${vcol}"><span class="dot"></span>${d.intake}</div><div class="sub">${subs[d.intake]||''}</div></div>
+  </div>
+  <div class="sec"><h2>Capture-quality notices</h2>${notices}</div>
+  <div class="sec"><h2>Encapsulation chains &nbsp;·&nbsp; count / %</h2>${chHTML}</div>
+  <div class="lower">
+   <div class="sec"><h2>Collection criteria</h2>${checks}</div>
+   <div class="sec"><h2>Packet distribution</h2><div class="stack">${stack}</div><div class="legend">${legend}</div><div class="chips">${enc}</div></div>
+   <div class="sec"><h2>Capture metadata</h2><div class="kv">${meta}</div></div>
+   <div class="sec"><h2>File</h2><div class="file">${frows}</div></div>
+  </div>`;
+}
+
+/* ---- report export: formal assessment report as Markdown (.md) ---- */
+function mdEsc(s){return String(s).replace(/\|/g,'\\|').replace(/\n/g,' ')}
+function buildMD(d,when){
+ const dt=when||new Date(),pad=n=>String(n).padStart(2,'0');
+ const id='PC-'+dt.getFullYear()+pad(dt.getMonth()+1)+pad(dt.getDate())+'-'+d.sha256.slice(0,8).toUpperCase();
+ const map={ACCEPT:['CONFORMS','The capture meets the collection requirements and is suitable for onward analysis.'],
+  REVIEW:['CONFORMS WITH DEVIATIONS','The capture is usable but exhibits deviations that should be reviewed before use (see findings).'],
+  REJECT:['DOES NOT CONFORM','The capture does not meet one or more mandatory collection requirements and should be re-taken.']};
+ const mr=map[d.intake]||map.REJECT;
+ const lvl={pass:'PASS',fail:'FAIL',warn:'DEVIATION',info:'INFO'};
+ const x=d.dist,m=d.meta;
+ let s='';
+ s+='# Technical Assessment Report — PCAP Capture Intake\n\n';
+ s+='**Report No.** `'+id+'`  ·  **Issued** '+dt.toLocaleString()+'  ·  **Classification** CONFIDENTIAL\n\n';
+ s+='| Field | Value |\n|---|---|\n';
+ s+='| Object under test | '+mdEsc(d.name)+' |\n';
+ s+='| SHA-256 | `'+d.sha256+'` |\n';
+ s+='| Size | '+human(d.total)+' ('+N(d.packets)+' packets, '+d.format.toUpperCase()+') |\n';
+ s+='| Assessment tool | PicoCap v1.0 “Groundhog” — local capture intake checker |\n';
+ s+='| Method | Automated static analysis of the capture container and packet headers |\n\n';
+ s+='## Assessment result\n\n';
+ s+='> ### '+mr[0]+' — Conformance '+d.conformance.toFixed(1)+'%\n>\n> '+mr[1]+'\n\n';
+ s+='## 1&nbsp;&nbsp;Scope and object\n\n';
+ s+='This report documents an automated intake assessment of the packet capture identified above. It was examined for container integrity and conformance with the PCAP Collection Guide, and its packet distribution, encapsulation and capture-quality artefacts were analysed. Packet payloads are neither stored nor reproduced. This is an automated technical check, not a certification.\n\n';
+ s+='## 2&nbsp;&nbsp;Assessment of collection criteria\n\n| # | Requirement | Result | Remark |\n|---:|---|:--:|---|\n';
+ d.checks.forEach((c,i)=>{s+='| '+(i+1)+' | '+mdEsc(c.label)+' | **'+(lvl[c.level]||'INFO')+'** | '+mdEsc(c.detail)+' |\n';});
+ s+='\n## 3&nbsp;&nbsp;Capture-quality findings\n\n';
+ if(d.notices&&d.notices.length){d.notices.forEach((n,i)=>{
+   s+='### Finding F'+(i+1)+' — '+n.title+'\n\n*Severity: Major · Reference: `'+n.code+'`*\n\n'+n.text+'\n\n';});}
+ else s+='_No capture-quality findings were raised. The traffic shows no evidence of mirror duplication or other collection artefacts._\n\n';
+ s+='## 4&nbsp;&nbsp;Packet distribution\n\n| Metric | Values |\n|---|---|\n';
+ s+='| Layer-2 cast | Unicast '+N(x.unicast)+' · Multicast '+N(x.multicast)+' · Broadcast '+N(x.broadcast)+' |\n';
+ s+='| Network layer | IPv4 '+N(x.ipv4)+' · IPv6 '+N(x.ipv6)+' · ARP '+N(x.arp)+' |\n';
+ s+='| Encapsulation | GRE '+N(x.gre)+' · ERSPAN '+N(x.erspan)+' · VXLAN '+N(x.vxlan)+' · Geneve '+N(x.geneve)+' |\n';
+ s+='| VLAN | '+N(x.vlan)+' tagged · QinQ '+N(x.qinq)+' · '+x.vlan_ids+' distinct IDs |\n';
+ s+='| Nesting | max tunnel depth '+x.max_depth+' · multi-encapsulated '+N(x.multi_encap)+' frames |\n';
+ s+='| Endpoints | '+N(d.src_macs)+' distinct MAC · '+N(d.ip_addrs)+' IP addresses |\n\n';
+ s+='## 5&nbsp;&nbsp;Encapsulation chains (count / %)\n\n';
+ const ch=d.chains||[];
+ if(ch.length){
+  const max=Math.max.apply(null,ch.map(c=>c.pct));
+  s+='| Chain | Count | % | |\n|---|---:|---:|---|\n';
+  ch.forEach(c=>{const bl=Math.max(1,Math.round(c.pct/max*20));s+='| `'+c.chain+'` | '+N(c.count)+' | '+c.pct.toFixed(1)+'% | '+'█'.repeat(bl)+' |\n';});
+ } else s+='_No decodable Layer-2 chains._\n';
+ s+='\n## 6&nbsp;&nbsp;Capture metadata\n\n| Field | Value |\n|---|---|\n';
+ [['Recorded start',m.start],['Recorded end',m.end],['Duration',m.duration_h>0?fmtDur(m.duration_h):'-'],
+  ['Throughput',m.rate_bps>0?(m.rate_bps/1e6).toFixed(2)+' Mbit/s':'-'],['pcap version',m.ver],['Byte order',m.endian],
+  ['Timestamp precision',m.ts_prec],['Link type',m.linktype],['Snap length',m.snaplen==0?'unlimited':N(m.snaplen)+' B'],
+  ['Interfaces',m.ifaces],['Average packet',m.avg_pkt+' B'],['Data on wire',human(m.wire_bytes)]]
+  .forEach(([k,v])=>{s+='| '+k+' | '+mdEsc(v)+' |\n';});
+ s+='\n## 7&nbsp;&nbsp;Basis and disclaimer\n\n';
+ s+='Criteria basis: PCAP Collection Guide (format, full-frame capture, per-file size, endpoint diversity and representative duration). Duplicate-frame detection flags frames whose inner L3 content recurs within the configured time window, indicating simultaneous TX and RX mirroring rather than genuine retransmission. Thresholds are configurable. This automated report contains no manual review and does not constitute a certification or accredited test result.\n\n';
+ s+='_Prepared by PicoCap (automated) · '+dt.toLocaleString()+'_\n';
+ return s;
+}
+function exportMD(){
+ const res=selected===null?null:byUid(selected);if(!res||!res.d)return;
+ const blob=new Blob([buildMD(res.d,res.when)],{type:'text/markdown'});
+ const url=URL.createObjectURL(blob),a=document.createElement('a');
+ a.href=url;a.download=res.d.name.replace(/\.(pcap|pcapng|cap)$/i,'')+'-assessment.md';
+ document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),4000);
+}
+</script></body></html>

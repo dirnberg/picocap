@@ -1,0 +1,9 @@
+/target
+# real config holds the secret token — keep it out of git
+picocap.yml
+.env
+# local scan artifacts
+*.pcap
+*.pcapng
+/reports
+.DS_Store

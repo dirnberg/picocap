@@ -1,0 +1,20 @@
+services:
+  picocap:
+    build: .
+    image: picocap:1.0.0
+    command: ["serve", "0.0.0.0:8088"]
+    # Host exposure limited to localhost; use an SSH tunnel / TLS proxy for remote.
+    ports:
+      - "127.0.0.1:8088:8088"
+    environment:
+      # token required; put it in a .env file next to this compose (see .env.example)
+      - PICOCAP_TOKEN=${PICOCAP_TOKEN:?set PICOCAP_TOKEN in .env}
+    # hardening: the binary only reads and never writes to disk
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped

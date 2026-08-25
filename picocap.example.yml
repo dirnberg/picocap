@@ -1,0 +1,20 @@
+# PicoCap configuration — every tunable parameter lives here.
+# Loaded from ./picocap.yml (override the path with $PICOCAP_CONFIG).
+
+# --- Web GUI ---
+listen_addr: 127.0.0.1:8088   # bind address:port. 127.0.0.1 = localhost only (safe).
+                              # Set 0.0.0.0 to expose on the LAN — only WITH auth_token below.
+auth_token:                   # empty = no auth; set a long random token to require it
+                              # (browser: user=anything, password=token; API: Authorization: Bearer <token>)
+max_upload_mb: 768            # largest file the GUI will accept
+
+# --- Collection criteria ---
+size_limit_mb: 500            # a single capture should stay at/below this (split with -C)
+full_snaplen: 65535           # full-frame snap length expected from -s 0
+devices_min_ok: 5             # >= this many distinct devices -> pass
+devices_min_warn: 2           # < this many devices -> fail (otherwise warn)
+duration_min_s: 5             # captures shorter than this are only warned (changeable)
+
+# --- SPAN double-capture (duplicate frames) ---
+dup_window_ms: 5              # two identical frames within this window = mirror duplicate
+dup_notice_pct: 10           # raise the span_double_capture notice at/above this %

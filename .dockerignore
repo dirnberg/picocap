@@ -1,0 +1,10 @@
+target
+Dockerfile
+docker-compose.yml
+.dockerignore
+.env
+.env.example
+picocap.yml
+.git
+README.md
+*.md
