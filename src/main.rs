@@ -1001,7 +1001,7 @@ fn grp(n: u64) -> String {
     let b = s.as_bytes();
     let mut out = String::new();
     for (i, c) in b.iter().enumerate() {
-        if i > 0 && (b.len() - i) % 3 == 0 {
+        if i > 0 && (b.len() - i).is_multiple_of(3) {
             out.push('.');
         }
         out.push(*c as char);
@@ -1443,7 +1443,7 @@ fn authorized(headers: &axum::http::HeaderMap) -> bool {
     if let Some(b64) = h.strip_prefix("Basic ") {
         if let Some(dec) = b64_decode(b64) {
             if let Ok(s) = String::from_utf8(dec) {
-                let pw = s.splitn(2, ':').nth(1).unwrap_or("");
+                let pw = s.split_once(':').map(|(_, p)| p).unwrap_or("");
                 return ct_eq(pw, token) || ct_eq(&s, token);
             }
         }
