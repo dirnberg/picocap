@@ -1,9 +1,6 @@
 # PicoCap Manifest — inherited, and only what is actually implemented
 
-PicoCap descends from **APEX.ai**, whose self-evolving OT manifest (seeded in turn
-from the *Vibecoding* manifest) defines how the tool is built. This file records
-**only the parts of that manifest that PicoCap actually implements** — nothing
-aspirational.
+This file records **only the parts of that manifest that PicoCap actually implements** — nothing aspirational.
 
 ## What PicoCap is
 
@@ -60,5 +57,5 @@ removed or reversed.
 
 ---
 
-*Lineage: Vibecoding manifest → APEX.ai manifest → PicoCap (this file = the
+*Lineage: Vibecoding manifest → PicoCap (this file = the
 implemented subset).*
