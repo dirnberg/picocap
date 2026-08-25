@@ -20,6 +20,8 @@ double-captures. It only ever **reads** a file; it never rewrites or forwards it
 
 Pure Rust, no `libpcap`, no system dependencies. CLI + a self-contained web GUI.
 
+![PicoCap web GUI — capture intake dashboard with conformance gauge, SPAN double-capture notice and encapsulation-chain breakdown](docs/gui.png)
+
 ---
 
 ## What it checks
@@ -73,8 +75,8 @@ picocap serve                     # http://127.0.0.1:8088  (localhost by default
   "last analysed" timestamp
 - Radial **conformance gauge**, capture-quality notices, collection-criteria
   checklist, packet distribution, **encapsulation-chain chart**, metadata
-- **⤓ Report .md** — download the assessment as Markdown (client-side, no server
-  round-trip, no print dialog)
+- **⤓ Report .md** — one-click download of the server-generated Markdown
+  assessment (same source as the CLI `--report`), no print dialog
 
 ## Docker
 
@@ -153,8 +155,7 @@ check: SPAN double-capture makes every frame show up twice.
 
 ## Design manifest
 
-The principles PicoCap is built on — inherited from the APEX.ai manifest, listing
-only what is actually implemented here — are in [MANIFEST.md](MANIFEST.md).
+The principles PicoCap is built on, listing only what is actually implemented here, are in [MANIFEST.md](MANIFEST.md).
 
 ## License
 

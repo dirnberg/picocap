@@ -1,6 +1,6 @@
-# PicoCap Manifest — inherited, and only what is actually implemented
+# PicoCap Manifest — principles, and only what is actually implemented
 
-This file records **only the parts of that manifest that PicoCap actually implements** — nothing aspirational.
+This file records **only what PicoCap actually implements** — nothing aspirational.
 
 ## What PicoCap is
 
@@ -9,7 +9,7 @@ A tiny, **read-only** PCAP/PCAPNG *intake checker*. In scope: container integrit
 GRE/ERSPAN/VXLAN decode, encapsulation-chain distribution, **SPAN double-capture
 (TX+RX)** detection, capture metadata.
 
-**Not in scope** (same exclusions as the parent): active scanning, packet
+**Not in scope:** active scanning, packet
 manipulation, TLS decryption, anomaly ML / detection rules. PicoCap only answers
 *"is this capture clean and usable?"*.
 
@@ -22,7 +22,7 @@ cross-checked with `tshark`.
 
 ## Principles — realized
 
-| # | Principle (from the parent manifest) | In PicoCap |
+| # | Principle | In PicoCap |
 |---|---|---|
 | 1 | Understand the real traffic first — no check without a real or synthetic test capture | ✅ verified vs real ERSPAN captures + `tshark`; synthetic tests for VLAN/QinQ/VXLAN/ERSPAN |
 | 2 | Security over convenience — passive, no manipulation | ✅ read-only; never rewrites or forwards; localhost by default + optional token |
@@ -35,7 +35,7 @@ cross-checked with `tshark`.
 
 ## Security principle (non-negotiable) — satisfied
 
-The parent's **three-capabilities rule**: no flow may combine (a) access to
+The **three-capabilities rule**: no flow may combine (a) access to
 sensitive capture data, (b) foreign alert/config content, and (c) the ability to
 send outward. PicoCap **breaks the triad by design** — it never sends anywhere:
 no SIEM, no upload, no network egress. It reads one local file and shows a result.
