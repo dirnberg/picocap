@@ -308,64 +308,10 @@ function detailHTML(d,when){
   </div>`;
 }
 
-/* ---- report export: formal assessment report as Markdown (.md) ---- */
-function mdEsc(s){return String(s).replace(/\|/g,'\\|').replace(/\n/g,' ')}
-function buildMD(d,when){
- const dt=when||new Date(),pad=n=>String(n).padStart(2,'0');
- const id='PC-'+dt.getFullYear()+pad(dt.getMonth()+1)+pad(dt.getDate())+'-'+d.sha256.slice(0,8).toUpperCase();
- const map={ACCEPT:['CONFORMS','The capture meets the collection requirements and is suitable for onward analysis.'],
-  REVIEW:['CONFORMS WITH DEVIATIONS','The capture is usable but exhibits deviations that should be reviewed before use (see findings).'],
-  REJECT:['DOES NOT CONFORM','The capture does not meet one or more mandatory collection requirements and should be re-taken.']};
- const mr=map[d.intake]||map.REJECT;
- const lvl={pass:'PASS',fail:'FAIL',warn:'DEVIATION',info:'INFO'};
- const x=d.dist,m=d.meta;
- let s='';
- s+='# Technical Assessment Report — PCAP Capture Intake\n\n';
- s+='**Report No.** `'+id+'`  ·  **Issued** '+dt.toLocaleString()+'  ·  **Classification** CONFIDENTIAL\n\n';
- s+='| Field | Value |\n|---|---|\n';
- s+='| Object under test | '+mdEsc(d.name)+' |\n';
- s+='| SHA-256 | `'+d.sha256+'` |\n';
- s+='| Size | '+human(d.total)+' ('+N(d.packets)+' packets, '+d.format.toUpperCase()+') |\n';
- s+='| Assessment tool | PicoCap v1.0 “Groundhog” — local capture intake checker |\n';
- s+='| Method | Automated static analysis of the capture container and packet headers |\n\n';
- s+='## Assessment result\n\n';
- s+='> ### '+mr[0]+' — Conformance '+d.conformance.toFixed(1)+'%\n>\n> '+mr[1]+'\n\n';
- s+='## 1&nbsp;&nbsp;Scope and object\n\n';
- s+='This report documents an automated intake assessment of the packet capture identified above. It was examined for container integrity and conformance with the PCAP Collection Guide, and its packet distribution, encapsulation and capture-quality artefacts were analysed. Packet payloads are neither stored nor reproduced. This is an automated technical check, not a certification.\n\n';
- s+='## 2&nbsp;&nbsp;Assessment of collection criteria\n\n| # | Requirement | Result | Remark |\n|---:|---|:--:|---|\n';
- d.checks.forEach((c,i)=>{s+='| '+(i+1)+' | '+mdEsc(c.label)+' | **'+(lvl[c.level]||'INFO')+'** | '+mdEsc(c.detail)+' |\n';});
- s+='\n## 3&nbsp;&nbsp;Capture-quality findings\n\n';
- if(d.notices&&d.notices.length){d.notices.forEach((n,i)=>{
-   s+='### Finding F'+(i+1)+' — '+n.title+'\n\n*Severity: Major · Reference: `'+n.code+'`*\n\n'+n.text+'\n\n';});}
- else s+='_No capture-quality findings were raised. The traffic shows no evidence of mirror duplication or other collection artefacts._\n\n';
- s+='## 4&nbsp;&nbsp;Packet distribution\n\n| Metric | Values |\n|---|---|\n';
- s+='| Layer-2 cast | Unicast '+N(x.unicast)+' · Multicast '+N(x.multicast)+' · Broadcast '+N(x.broadcast)+' |\n';
- s+='| Network layer | IPv4 '+N(x.ipv4)+' · IPv6 '+N(x.ipv6)+' · ARP '+N(x.arp)+' |\n';
- s+='| Encapsulation | GRE '+N(x.gre)+' · ERSPAN '+N(x.erspan)+' · VXLAN '+N(x.vxlan)+' · Geneve '+N(x.geneve)+' |\n';
- s+='| VLAN | '+N(x.vlan)+' tagged · QinQ '+N(x.qinq)+' · '+x.vlan_ids+' distinct IDs |\n';
- s+='| Nesting | max tunnel depth '+x.max_depth+' · multi-encapsulated '+N(x.multi_encap)+' frames |\n';
- s+='| Endpoints | '+N(d.src_macs)+' distinct MAC · '+N(d.ip_addrs)+' IP addresses |\n\n';
- s+='## 5&nbsp;&nbsp;Encapsulation chains (count / %)\n\n';
- const ch=d.chains||[];
- if(ch.length){
-  const max=Math.max.apply(null,ch.map(c=>c.pct));
-  s+='| Chain | Count | % | |\n|---|---:|---:|---|\n';
-  ch.forEach(c=>{const bl=Math.max(1,Math.round(c.pct/max*20));s+='| `'+c.chain+'` | '+N(c.count)+' | '+c.pct.toFixed(1)+'% | '+'█'.repeat(bl)+' |\n';});
- } else s+='_No decodable Layer-2 chains._\n';
- s+='\n## 6&nbsp;&nbsp;Capture metadata\n\n| Field | Value |\n|---|---|\n';
- [['Recorded start',m.start],['Recorded end',m.end],['Duration',m.duration_h>0?fmtDur(m.duration_h):'-'],
-  ['Throughput',m.rate_bps>0?(m.rate_bps/1e6).toFixed(2)+' Mbit/s':'-'],['pcap version',m.ver],['Byte order',m.endian],
-  ['Timestamp precision',m.ts_prec],['Link type',m.linktype],['Snap length',m.snaplen==0?'unlimited':N(m.snaplen)+' B'],
-  ['Interfaces',m.ifaces],['Average packet',m.avg_pkt+' B'],['Data on wire',human(m.wire_bytes)]]
-  .forEach(([k,v])=>{s+='| '+k+' | '+mdEsc(v)+' |\n';});
- s+='\n## 7&nbsp;&nbsp;Basis and disclaimer\n\n';
- s+='Criteria basis: PCAP Collection Guide (format, full-frame capture, per-file size, endpoint diversity and representative duration). Duplicate-frame detection flags frames whose inner L3 content recurs within the configured time window, indicating simultaneous TX and RX mirroring rather than genuine retransmission. Thresholds are configurable. This automated report contains no manual review and does not constitute a certification or accredited test result.\n\n';
- s+='_Prepared by PicoCap (automated) · '+dt.toLocaleString()+'_\n';
- return s;
-}
+/* ---- report export: the server (Rust markdown_report) is the single source; the GUI just downloads it ---- */
 function exportMD(){
- const res=selected===null?null:byUid(selected);if(!res||!res.d)return;
- const blob=new Blob([buildMD(res.d,res.when)],{type:'text/markdown'});
+ const res=selected===null?null:byUid(selected);if(!res||!res.d||!res.d.report_md)return;
+ const blob=new Blob([res.d.report_md],{type:'text/markdown'});
  const url=URL.createObjectURL(blob),a=document.createElement('a');
  a.href=url;a.download=res.d.name.replace(/\.(pcap|pcapng|cap)$/i,'')+'-assessment.md';
  document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),4000);

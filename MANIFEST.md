@@ -32,7 +32,7 @@ cross-checked with `tshark`.
 | 3 | KISS — the simplest thing that works | ✅ pure Rust, no `libpcap`, single binary, GUI embedded via `include_str!` |
 | 4 | YAGNI — no speculative features | ✅ checker only; dropped non-verifiable criteria; MVP scope |
 | 5 | One responsibility per check | ✅ each collection criterion is a separate, atomic check |
-| 6 | DRY | ◑ mostly — but the Markdown report lives in two places (see caveat) |
+| 6 | DRY | ✅ the assessment report has a single source (Rust `markdown_report`); the CLI `--report` and the GUI both use it |
 | 7 | Measure before optimize | ◑ distributions/chains cross-checked with `tshark`; no perf tuning needed yet |
 | 8 | Context is code — small diffs, commit after each working state | ✅ (and: no `git --amend` after push) |
 
@@ -57,13 +57,6 @@ words.
 `MAJOR.MINOR.PATCH` in `Cargo.toml`; release notes in the README.
 PATCH = a check refined + test · MINOR = a new check/notice · MAJOR = a check
 removed or reversed.
-
-## Honest caveat (where the manifest is not fully met)
-
-- **DRY (#6):** the assessment report is generated twice — browser JavaScript in
-  `src/index.html` (the GUI ⤓ export) and Rust in `src/main.rs` (`--report`). A
-  format change must be made in both. Consolidating is future work; both are
-  covered by the release version so they stay in step for now.
 
 ---
 

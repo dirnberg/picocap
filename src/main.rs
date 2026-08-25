@@ -1243,6 +1243,8 @@ async fn check(mut mp: axum::extract::Multipart) -> axum::response::Response {
     let sha = sha256_hex(&data);
     let r = analyze(&data);
     let s = &r.stats;
+    // single source of truth: the GUI downloads this instead of rebuilding it
+    let report_md = markdown_report(&name, &sha, &r);
 
     let avg_pkt = if r.packets > 0 {
         r.wire_bytes / r.packets as u64
@@ -1312,7 +1314,7 @@ async fn check(mut mp: axum::extract::Multipart) -> axum::response::Response {
         .join(",");
 
     let json = format!(
-        "{{\"name\":{name},\"format\":\"{fmt}\",\"linktype\":{lt},\"packets\":{pk},\"consumed\":{cons},\"total\":{tot},\"score\":{sc:.1},\"conformance\":{conf:.1},\"clean\":{cl},\"note\":{nt},\"sha256\":\"{sha}\",\"intake\":\"{intake}\",\"snaplen\":{snap},\"truncated\":{trunc},\"src_macs\":{macs},\"ip_addrs\":{ips},\"duration\":{dur:.1},\"has_time\":{ht},\"meta\":{{\"ver\":{ver},\"endian\":\"{endian}\",\"ts_prec\":\"{prec}\",\"ifaces\":{ifc},\"snaplen\":{snap},\"linktype\":{lt},\"start\":\"{start}\",\"end\":\"{end}\",\"duration_h\":{dur:.1},\"wire_bytes\":{wire},\"avg_pkt\":{avg},\"rate_bps\":{rate:.0}}},\"dist\":{{\"unicast\":{uni},\"multicast\":{mc},\"broadcast\":{bc},\"ipv4\":{v4},\"ipv6\":{v6},\"arp\":{arp},\"vlan\":{vlan},\"gre\":{gre},\"erspan\":{ers},\"vxlan\":{vx},\"geneve\":{gen},\"decoded\":{dec},\"dup_frames\":{dupf},\"dup_pct\":{dupp:.1},\"qinq\":{qinq},\"vlan_ids\":{vids},\"max_depth\":{mdep},\"multi_encap\":{menc}}},\"chains\":[{chains_json}],\"checks\":[{checks}],\"notices\":[{notices}]}}",
+        "{{\"name\":{name},\"format\":\"{fmt}\",\"linktype\":{lt},\"packets\":{pk},\"consumed\":{cons},\"total\":{tot},\"score\":{sc:.1},\"conformance\":{conf:.1},\"clean\":{cl},\"note\":{nt},\"sha256\":\"{sha}\",\"intake\":\"{intake}\",\"snaplen\":{snap},\"truncated\":{trunc},\"src_macs\":{macs},\"ip_addrs\":{ips},\"duration\":{dur:.1},\"has_time\":{ht},\"meta\":{{\"ver\":{ver},\"endian\":\"{endian}\",\"ts_prec\":\"{prec}\",\"ifaces\":{ifc},\"snaplen\":{snap},\"linktype\":{lt},\"start\":\"{start}\",\"end\":\"{end}\",\"duration_h\":{dur:.1},\"wire_bytes\":{wire},\"avg_pkt\":{avg},\"rate_bps\":{rate:.0}}},\"dist\":{{\"unicast\":{uni},\"multicast\":{mc},\"broadcast\":{bc},\"ipv4\":{v4},\"ipv6\":{v6},\"arp\":{arp},\"vlan\":{vlan},\"gre\":{gre},\"erspan\":{ers},\"vxlan\":{vx},\"geneve\":{gen},\"decoded\":{dec},\"dup_frames\":{dupf},\"dup_pct\":{dupp:.1},\"qinq\":{qinq},\"vlan_ids\":{vids},\"max_depth\":{mdep},\"multi_encap\":{menc}}},\"chains\":[{chains_json}],\"checks\":[{checks}],\"notices\":[{notices}],\"report_md\":{rmd}}}",
         name = json_str(&name),
         fmt = r.format,
         lt = json_str(&r.linktype),
@@ -1357,6 +1359,7 @@ async fn check(mut mp: axum::extract::Multipart) -> axum::response::Response {
         vids = s.vlan_ids.len(),
         mdep = s.max_depth,
         menc = s.multi_encap,
+        rmd = json_str(&report_md),
     );
     (
         [(axum::http::header::CONTENT_TYPE, "application/json")],
