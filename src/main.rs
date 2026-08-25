@@ -162,10 +162,10 @@ struct Stats {
     seen: HashMap<u64, f64>,
     dup_frames: u64,
     // VLAN + nested encapsulation
-    qinq: u64,             // frames with >=2 stacked VLAN tags
+    qinq: u64, // frames with >=2 stacked VLAN tags
     vlan_ids: HashSet<u16>,
-    max_depth: u32,        // deepest tunnel nesting seen
-    multi_encap: u64,      // frames with >=2 tunnel layers
+    max_depth: u32,               // deepest tunnel nesting seen
+    multi_encap: u64,             // frames with >=2 tunnel layers
     chains: HashMap<String, u64>, // encapsulation-chain distribution
 }
 
@@ -201,8 +201,8 @@ struct Report {
     stats: Stats,
     checks: Vec<Check>,
     notices: Vec<Notice>,
-    intake: &'static str,  // ACCEPT | REVIEW | REJECT
-    conformance: f64,      // 0-100: 100 only when every criterion passes
+    intake: &'static str, // ACCEPT | REVIEW | REJECT
+    conformance: f64,     // 0-100: 100 only when every criterion passes
 }
 
 /// Format a unix epoch (seconds) as UTC calendar time — pure, no deps.
@@ -566,8 +566,10 @@ fn record_chain(s: &mut Stats, chain: &[&str]) {
 
 fn collect_ipv4(d: &[u8], s: &mut Stats) {
     if d.len() >= 20 && s.ips.len() < 400_000 {
-        s.ips.insert(u32::from_be_bytes([d[12], d[13], d[14], d[15]]) as u128);
-        s.ips.insert(u32::from_be_bytes([d[16], d[17], d[18], d[19]]) as u128);
+        s.ips
+            .insert(u32::from_be_bytes([d[12], d[13], d[14], d[15]]) as u128);
+        s.ips
+            .insert(u32::from_be_bytes([d[16], d[17], d[18], d[19]]) as u128);
     }
 }
 
@@ -922,12 +924,19 @@ fn build_checks(r: &mut Report) {
         } else if r.total < 64 * 1024 {
             (
                 "warn",
-                format!("Only {} — capture longer for representative traffic", human_bytes(r.total)),
+                format!(
+                    "Only {} — capture longer for representative traffic",
+                    human_bytes(r.total)
+                ),
             )
         } else {
             (
                 "pass",
-                format!("{} — within the {} MB guideline", human_bytes(r.total), limit_mb),
+                format!(
+                    "{} — within the {} MB guideline",
+                    human_bytes(r.total),
+                    limit_mb
+                ),
             )
         };
         c.push(Check {
@@ -945,10 +954,19 @@ fn build_checks(r: &mut Report) {
         } else if r.src_macs < cfg().devices_ok {
             (
                 "warn",
-                format!("{} devices — few endpoints, add more capture points", r.src_macs),
+                format!(
+                    "{} devices — few endpoints, add more capture points",
+                    r.src_macs
+                ),
             )
         } else {
-            ("pass", format!("{} distinct devices, {} IP addresses", r.src_macs, r.ip_addrs))
+            (
+                "pass",
+                format!(
+                    "{} distinct devices, {} IP addresses",
+                    r.src_macs, r.ip_addrs
+                ),
+            )
         };
         c.push(Check {
             level: lvl,
@@ -959,7 +977,10 @@ fn build_checks(r: &mut Report) {
         // 6) Duration / representativeness
         if r.has_time {
             let (lvl, det) = if r.duration < cfg().duration_min {
-                ("warn", format!("Only {} — capture a longer window", human_dur(r.duration)))
+                (
+                    "warn",
+                    format!("Only {} — capture a longer window", human_dur(r.duration)),
+                )
             } else {
                 ("pass", format!("Spans {}", human_dur(r.duration)))
             };
@@ -1030,36 +1051,108 @@ fn markdown_report(name: &str, sha: &str, r: &Report) -> String {
     let s = &r.stats;
     let mut o = String::new();
     let _ = writeln!(o, "# Technical Assessment Report — PCAP Capture Intake\n");
-    let _ = writeln!(o, "**Report No.** `{rid}`  ·  **Issued** {issued}  ·  **Classification** CONFIDENTIAL\n");
+    let _ = writeln!(
+        o,
+        "**Report No.** `{rid}`  ·  **Issued** {issued}  ·  **Classification** CONFIDENTIAL\n"
+    );
     let _ = writeln!(o, "| Field | Value |\n|---|---|");
     let _ = writeln!(o, "| Object under test | {} |", md_esc(name));
     let _ = writeln!(o, "| SHA-256 | `{sha}` |");
-    let _ = writeln!(o, "| Size | {} ({} packets, {}) |", human_bytes(r.total), grp(r.packets as u64), r.format.to_uppercase());
-    let _ = writeln!(o, "| Assessment tool | PicoCap v{VERSION} \"{CODENAME}\" — local capture intake checker |\n");
+    let _ = writeln!(
+        o,
+        "| Size | {} ({} packets, {}) |",
+        human_bytes(r.total),
+        grp(r.packets as u64),
+        r.format.to_uppercase()
+    );
+    let _ = writeln!(
+        o,
+        "| Assessment tool | PicoCap v{VERSION} \"{CODENAME}\" — local capture intake checker |\n"
+    );
     let _ = writeln!(o, "## Assessment result\n");
-    let _ = writeln!(o, "> ### {result} — Conformance {:.1}%\n>\n> {statement}\n", r.conformance);
+    let _ = writeln!(
+        o,
+        "> ### {result} — Conformance {:.1}%\n>\n> {statement}\n",
+        r.conformance
+    );
     let _ = writeln!(o, "## 1  Assessment of collection criteria\n");
-    let _ = writeln!(o, "| # | Requirement | Result | Remark |\n|---:|---|:--:|---|");
+    let _ = writeln!(
+        o,
+        "| # | Requirement | Result | Remark |\n|---:|---|:--:|---|"
+    );
     for (i, c) in r.checks.iter().enumerate() {
-        let lvl = match c.level { "pass" => "PASS", "fail" => "FAIL", "warn" => "DEVIATION", _ => "INFO" };
-        let _ = writeln!(o, "| {} | {} | **{lvl}** | {} |", i + 1, md_esc(&c.label), md_esc(&c.detail));
+        let lvl = match c.level {
+            "pass" => "PASS",
+            "fail" => "FAIL",
+            "warn" => "DEVIATION",
+            _ => "INFO",
+        };
+        let _ = writeln!(
+            o,
+            "| {} | {} | **{lvl}** | {} |",
+            i + 1,
+            md_esc(&c.label),
+            md_esc(&c.detail)
+        );
     }
     let _ = writeln!(o, "\n## 2  Capture-quality findings\n");
     if r.notices.is_empty() {
         let _ = writeln!(o, "_No capture-quality findings were raised._\n");
     } else {
         for (i, n) in r.notices.iter().enumerate() {
-            let _ = writeln!(o, "### Finding F{} — {}\n\n*Severity: Major · Reference: `{}`*\n\n{}\n", i + 1, n.title, n.code, n.text);
+            let _ = writeln!(
+                o,
+                "### Finding F{} — {}\n\n*Severity: Major · Reference: `{}`*\n\n{}\n",
+                i + 1,
+                n.title,
+                n.code,
+                n.text
+            );
         }
     }
     let _ = writeln!(o, "## 3  Packet distribution\n");
     let _ = writeln!(o, "| Metric | Values |\n|---|---|");
-    let _ = writeln!(o, "| Layer-2 cast | Unicast {} · Multicast {} · Broadcast {} |", grp(s.unicast), grp(s.multicast), grp(s.broadcast));
-    let _ = writeln!(o, "| Network layer | IPv4 {} · IPv6 {} · ARP {} |", grp(s.ipv4), grp(s.ipv6), grp(s.arp));
-    let _ = writeln!(o, "| Encapsulation | GRE {} · ERSPAN {} · VXLAN {} · Geneve {} |", grp(s.gre), grp(s.erspan), grp(s.vxlan), grp(s.geneve));
-    let _ = writeln!(o, "| VLAN | {} tagged · QinQ {} · {} distinct IDs |", grp(s.vlan), grp(s.qinq), s.vlan_ids.len());
-    let _ = writeln!(o, "| Nesting | max tunnel depth {} · multi-encapsulated {} frames |", s.max_depth, grp(s.multi_encap));
-    let _ = writeln!(o, "| Endpoints | {} distinct MAC · {} IP addresses |\n", grp(r.src_macs as u64), grp(r.ip_addrs as u64));
+    let _ = writeln!(
+        o,
+        "| Layer-2 cast | Unicast {} · Multicast {} · Broadcast {} |",
+        grp(s.unicast),
+        grp(s.multicast),
+        grp(s.broadcast)
+    );
+    let _ = writeln!(
+        o,
+        "| Network layer | IPv4 {} · IPv6 {} · ARP {} |",
+        grp(s.ipv4),
+        grp(s.ipv6),
+        grp(s.arp)
+    );
+    let _ = writeln!(
+        o,
+        "| Encapsulation | GRE {} · ERSPAN {} · VXLAN {} · Geneve {} |",
+        grp(s.gre),
+        grp(s.erspan),
+        grp(s.vxlan),
+        grp(s.geneve)
+    );
+    let _ = writeln!(
+        o,
+        "| VLAN | {} tagged · QinQ {} · {} distinct IDs |",
+        grp(s.vlan),
+        grp(s.qinq),
+        s.vlan_ids.len()
+    );
+    let _ = writeln!(
+        o,
+        "| Nesting | max tunnel depth {} · multi-encapsulated {} frames |",
+        s.max_depth,
+        grp(s.multi_encap)
+    );
+    let _ = writeln!(
+        o,
+        "| Endpoints | {} distinct MAC · {} IP addresses |\n",
+        grp(r.src_macs as u64),
+        grp(r.ip_addrs as u64)
+    );
     let _ = writeln!(o, "## 4  Encapsulation chains (count / %)\n");
     let mut cv: Vec<(&String, &u64)> = s.chains.iter().collect();
     cv.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
@@ -1067,34 +1160,88 @@ fn markdown_report(name: &str, sha: &str, r: &Report) -> String {
     if cv.is_empty() {
         let _ = writeln!(o, "_No decodable Layer-2 chains._");
     } else {
-        let maxpct = cv.first().map(|(_, v)| **v as f64 * 100.0 / total.max(1) as f64).unwrap_or(1.0).max(0.1);
+        let maxpct = cv
+            .first()
+            .map(|(_, v)| **v as f64 * 100.0 / total.max(1) as f64)
+            .unwrap_or(1.0)
+            .max(0.1);
         let _ = writeln!(o, "| Chain | Count | % | |\n|---|---:|---:|---|");
         for (k, v) in cv.iter().take(20) {
             let pct = **v as f64 * 100.0 / total.max(1) as f64;
             let bl = ((pct / maxpct * 20.0).round() as usize).max(1);
-            let _ = writeln!(o, "| `{k}` | {} | {pct:.1}% | {} |", grp(**v), "█".repeat(bl));
+            let _ = writeln!(
+                o,
+                "| `{k}` | {} | {pct:.1}% | {} |",
+                grp(**v),
+                "█".repeat(bl)
+            );
         }
     }
     let m = |k: &str, v: String| format!("| {k} | {} |", md_esc(&v));
     let _ = writeln!(o, "\n## 5  Capture metadata\n");
     let _ = writeln!(o, "| Field | Value |\n|---|---|");
-    let _ = writeln!(o, "{}", m("Recorded start", fmt_utc(s.ts_first.unwrap_or(0.0))));
-    let _ = writeln!(o, "{}", m("Recorded end", fmt_utc(s.ts_last.unwrap_or(0.0))));
-    let _ = writeln!(o, "{}", m("Duration", if r.has_time { human_dur(r.duration) } else { "-".into() }));
-    let rate = if r.has_time && r.duration > 0.0 { format!("{:.2} Mbit/s", r.wire_bytes as f64 * 8.0 / r.duration / 1e6) } else { "-".into() };
+    let _ = writeln!(
+        o,
+        "{}",
+        m("Recorded start", fmt_utc(s.ts_first.unwrap_or(0.0)))
+    );
+    let _ = writeln!(
+        o,
+        "{}",
+        m("Recorded end", fmt_utc(s.ts_last.unwrap_or(0.0)))
+    );
+    let _ = writeln!(
+        o,
+        "{}",
+        m(
+            "Duration",
+            if r.has_time {
+                human_dur(r.duration)
+            } else {
+                "-".into()
+            }
+        )
+    );
+    let rate = if r.has_time && r.duration > 0.0 {
+        format!("{:.2} Mbit/s", r.wire_bytes as f64 * 8.0 / r.duration / 1e6)
+    } else {
+        "-".into()
+    };
     let _ = writeln!(o, "{}", m("Throughput", rate));
     let _ = writeln!(o, "{}", m("pcap version", r.ver.clone()));
     let _ = writeln!(o, "{}", m("Byte order", r.endian.into()));
     let _ = writeln!(o, "{}", m("Timestamp precision", r.ts_prec.into()));
     let _ = writeln!(o, "{}", m("Link type", r.linktype.clone()));
-    let _ = writeln!(o, "{}", m("Snap length", if r.snaplen == 0 { "unlimited".into() } else { format!("{} B", grp(r.snaplen as u64)) }));
+    let _ = writeln!(
+        o,
+        "{}",
+        m(
+            "Snap length",
+            if r.snaplen == 0 {
+                "unlimited".into()
+            } else {
+                format!("{} B", grp(r.snaplen as u64))
+            }
+        )
+    );
     let _ = writeln!(o, "{}", m("Interfaces", r.iface_count.to_string()));
-    let avg = if r.packets > 0 { r.wire_bytes / r.packets as u64 } else { 0 };
+    let avg = if r.packets > 0 {
+        r.wire_bytes / r.packets as u64
+    } else {
+        0
+    };
     let _ = writeln!(o, "{}", m("Average packet", format!("{avg} B")));
-    let _ = writeln!(o, "{}", m("Data on wire", human_bytes(r.wire_bytes as usize)));
+    let _ = writeln!(
+        o,
+        "{}",
+        m("Data on wire", human_bytes(r.wire_bytes as usize))
+    );
     let _ = writeln!(o, "\n## 6  Basis and disclaimer\n");
     let _ = writeln!(o, "Criteria basis: PCAP Collection Guide (format, full-frame capture, per-file size, endpoint diversity and representative duration). Duplicate-frame detection flags frames whose inner L3 content recurs within the configured time window (TX+RX mirroring). Thresholds are configurable. This automated report contains no manual review and does not constitute a certification.\n");
-    let _ = writeln!(o, "_Prepared by PicoCap v{VERSION} \"{CODENAME}\" (automated) · {issued}_");
+    let _ = writeln!(
+        o,
+        "_Prepared by PicoCap v{VERSION} \"{CODENAME}\" (automated) · {issued}_"
+    );
     o
 }
 
@@ -1124,9 +1271,16 @@ fn run_cli(path: &str) -> i32 {
     println!("  file     : {name}");
     println!("  sha256   : {sha}");
     println!("  format   : {} ({})", r.format, r.linktype);
-    println!("  packets  : {}   size: {}", r.packets, human_bytes(r.total));
+    println!(
+        "  packets  : {}   size: {}",
+        r.packets,
+        human_bytes(r.total)
+    );
     println!("  integrity: [{bar}] {:.1}%  {}", r.score, r.note);
-    println!("  conform. : {:.1}%  (100% only when every criterion passes)", r.conformance);
+    println!(
+        "  conform. : {:.1}%  (100% only when every criterion passes)",
+        r.conformance
+    );
     println!("  ── Capture metadata ──");
     println!(
         "   recorded : {}  →  {}",
@@ -1144,7 +1298,11 @@ fn run_cli(path: &str) -> i32 {
         "   linktype : {}   snaplen: {}   interfaces: {}",
         r.linktype, r.snaplen, r.iface_count
     );
-    let avg = if r.packets > 0 { r.wire_bytes / r.packets as u64 } else { 0 };
+    let avg = if r.packets > 0 {
+        r.wire_bytes / r.packets as u64
+    } else {
+        0
+    };
     let rate = if r.has_time && r.duration > 0.0 {
         r.wire_bytes as f64 * 8.0 / r.duration / 1e6
     } else {
@@ -1529,7 +1687,9 @@ fn main() {
             print!("{}", markdown_report(&name, &sha, &r));
         }
         Some("-h") | Some("--help") | None => {
-            eprintln!("PicoCap 🩺 v{VERSION} \"{CODENAME}\" — PCAP/PCAPNG capture intake checker\n");
+            eprintln!(
+                "PicoCap 🩺 v{VERSION} \"{CODENAME}\" — PCAP/PCAPNG capture intake checker\n"
+            );
             eprintln!("  picocap <file>          check one capture file (text summary)");
             eprintln!("  picocap --report <file> write a Markdown assessment report to stdout");
             eprintln!("  picocap serve [addr]    start web GUI (default from picocap.yml)");
@@ -1725,7 +1885,10 @@ mod tests {
         }
         let r = analyze(&pcap(&recs));
         assert_eq!(r.packets, 10);
-        assert_eq!(r.stats.dup_frames, 5, "second copy of each pair is a duplicate");
+        assert_eq!(
+            r.stats.dup_frames, 5,
+            "second copy of each pair is a duplicate"
+        );
         assert!(
             r.notices.iter().any(|n| n.code == "span_double_capture"),
             "50% duplicates must raise the notice"
@@ -1752,11 +1915,19 @@ mod tests {
         let mut recs = Vec::new();
         for i in 0..1200u32 {
             let src = [0x02, 0, 0, 0, 0, (i % 6) as u8]; // 6 distinct source MACs
-            let f = eth(M2, src, 0x0800, &ipv4(6, (i % 65535) as u16, &vec![(i % 251) as u8; 40]));
+            let f = eth(
+                M2,
+                src,
+                0x0800,
+                &ipv4(6, (i % 65535) as u16, &[(i % 251) as u8; 40]),
+            );
             recs.push((i % 7, i, f)); // timestamps span 0..6 s
         }
         let r = analyze(&pcap(&recs));
-        assert!(r.total > 64 * 1024, "capture must exceed the tiny-file threshold");
+        assert!(
+            r.total > 64 * 1024,
+            "capture must exceed the tiny-file threshold"
+        );
         assert!(r.src_macs >= 5, "enough devices for the diversity check");
         assert!(r.notices.is_empty(), "no quality findings expected");
         assert_eq!(r.intake, "ACCEPT");

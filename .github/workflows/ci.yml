@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Build
+        run: cargo build --release --verbose
+      - name: Test
+        run: cargo test --release --verbose
+      - name: Clippy (deny warnings)
+        run: cargo clippy --release --all-targets -- -D warnings
+      - name: Format check
+        run: cargo fmt --all -- --check

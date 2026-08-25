@@ -2,6 +2,7 @@
 
 **The tiny PCAP / PCAPNG capture intake checker.**
 
+[![CI](https://github.com/dirnberg/picocap/actions/workflows/ci.yml/badge.svg)](https://github.com/dirnberg/picocap/actions/workflows/ci.yml)
 ![version](https://img.shields.io/badge/version-1.0.0%20%22Groundhog%22-19e0d8)
 ![license](https://img.shields.io/badge/license-MIT-blue)
 ![built with](https://img.shields.io/badge/built%20with-Rust-orange)
