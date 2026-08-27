@@ -7,11 +7,18 @@ This file records **only what PicoCap actually implements** — nothing aspirati
 A tiny, **read-only** PCAP/PCAPNG *intake checker*. In scope: container integrity
 + SHA-256, PCAP Collection Guide conformance, packet distribution, VLAN/QinQ and
 GRE/ERSPAN/VXLAN decode, encapsulation-chain distribution, **SPAN double-capture
-(TX+RX)** detection, capture metadata.
+(TX+RX)** detection, capture metadata, and (v1.1) **TCP session integrity** —
+handshake coverage (complete / SYN-only / mid-stream), **capture-drop detection**
+(sequence gaps = segments missing from the file), and runt/oversize frames.
+Multi-GB captures stream from disk (bounded memory).
 
-**Not in scope:** active scanning, packet
-manipulation, TLS decryption, anomaly ML / detection rules. PicoCap only answers
-*"is this capture clean and usable?"*.
+**Not in scope:** active scanning, packet manipulation, TLS decryption,
+anomaly ML / detection rules. PicoCap only answers *"is this capture clean and
+usable?"*. It deliberately draws the line at capture usability: **network-fault
+verdicts** — retransmission storms, routing loops, DNS/RST-storms, duplicate-IP —
+are *findings about the network*, not the capture, and belong to **apex.ai** (the
+OT passive analyzer), not here. PicoCap reports a sequence *gap* (the file missed
+a segment); it never claims *why the wire* lost a packet.
 
 ## The cycle (as realized)
 

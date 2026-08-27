@@ -15,7 +15,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
-const CODENAME: &str = "Groundhog";
+const CODENAME: &str = "Foxhound";
 
 /// All tunable parameters — overridable via a YAML config file.
 struct Config {
@@ -167,6 +167,29 @@ struct Stats {
     max_depth: u32,               // deepest tunnel nesting seen
     multi_encap: u64,             // frames with >=2 tunnel layers
     chains: HashMap<String, u64>, // encapsulation-chain distribution
+    // TCP session integrity (capture usability, not network-fault detection)
+    flows: HashMap<u64, FlowState>, // per canonical 5-tuple, bounded
+    seq_gaps: u64,                  // forward sequence jumps = segment(s) missing from the file
+    runts: u64,                     // on-wire frame length < 60 B (truncation / L2 corruption)
+    oversize: u64,                  // on-wire frame length > 1518 B (jumbo / malformed)
+    tcp_flows: u64,                 // finalized: distinct TCP sessions
+    hs_complete: u64,               // finalized: SYN + SYN-ACK both seen
+    hs_syn_only: u64,               // finalized: SYN but no SYN-ACK (one-directional capture?)
+    hs_midstream: u64,              // finalized: data before any SYN (capture started late)
+    acked_unseen: u64,              // ACK for data never captured = capture drop (RFC 9293 §3.4)
+    inner_trunc: u64,               // inner IP total-length > captured bytes = truncated segment
+    vxlan_legacy: u64,              // VXLAN on legacy UDP 8472 instead of RFC 7348 port 4789
+    vxlan_bad: u64,                 // VXLAN header with 'I' flag clear = RFC 7348 §5 violation
+}
+
+/// Minimal per-flow TCP state for handshake coverage + capture-drop detection.
+/// Direction index 0/1 = which endpoint of the canonical (sorted) pair is the sender.
+#[derive(Default, Clone)]
+struct FlowState {
+    saw_syn: bool,
+    saw_synack: bool,
+    saw_data_no_syn: bool,
+    next_seq: [Option<u32>; 2], // expected next sequence number per direction
 }
 
 /// A capture-quality notice (beyond the pass/fail collection criteria).
@@ -431,8 +454,20 @@ fn decap_once<'a>(f: &'a [u8], link: i32, s: &mut Stats) -> (&'a [u8], i32, Opti
                 None => return no,
             };
             match be16(u, 2) {
-                Some(4789) => {
+                Some(p @ (4789 | 8472)) => {
+                    // 4789 = RFC 7348 VXLAN; 8472 = Linux/legacy port (decoded too,
+                    // but flagged since 4789-only sensors miss it).
                     s.vxlan += 1;
+                    if p == 8472 {
+                        s.vxlan_legacy += 1;
+                    }
+                    // RFC 7348 §5: the VXLAN header 'I' flag (0x08) MUST be 1 for a
+                    // valid VNI. If it is clear, the encapsulation is malformed.
+                    if let Some(vh) = f.get(iphdr + 8..iphdr + 16) {
+                        if vh[0] & 0x08 == 0 {
+                            s.vxlan_bad += 1;
+                        }
+                    }
                     (f.get(iphdr + 8 + 8..).unwrap_or(&[]), 1, Some("VXLAN")) // UDP+VXLAN → inner eth
                 }
                 Some(6081) => {
@@ -532,6 +567,9 @@ fn analyze_packet(f: &[u8], link: i32, ts: Option<f64>, s: &mut Stats) {
             if let Some(ip) = inner.get(l3off..) {
                 if let Some(&p) = ip.get(9) {
                     chain.push(proto_name(p));
+                    if p == 6 {
+                        tcp_session(ip, false, s);
+                    }
                 }
                 collect_ipv4(ip, s);
                 dedup(ip, ts, s);
@@ -543,6 +581,9 @@ fn analyze_packet(f: &[u8], link: i32, ts: Option<f64>, s: &mut Stats) {
             if let Some(ip) = inner.get(l3off..) {
                 if let Some(&p) = ip.get(6) {
                     chain.push(proto_name(p));
+                    if p == 6 {
+                        tcp_session(ip, true, s);
+                    }
                 }
                 collect_ipv6(ip, s);
                 dedup(ip, ts, s);
@@ -583,6 +624,133 @@ fn collect_ipv6(d: &[u8], s: &mut Stats) {
     }
 }
 
+/// Hash a canonical (sorted) endpoint pair into a compact flow key.
+fn flow_hash(lo: (u128, u16), hi: (u128, u16)) -> u64 {
+    let mut b = Vec::with_capacity(36);
+    b.extend_from_slice(&lo.0.to_be_bytes());
+    b.extend_from_slice(&lo.1.to_be_bytes());
+    b.extend_from_slice(&hi.0.to_be_bytes());
+    b.extend_from_slice(&hi.1.to_be_bytes());
+    fnv1a(&b)
+}
+
+/// TCP session integrity: handshake coverage + capture-drop (sequence-gap)
+/// detection. This is a *capture-usability* signal — it answers "did the file
+/// miss segments the endpoints exchanged?", NOT "is the network faulty" (that
+/// is apex.ai's job). Sequence math uses on-wire lengths (IP total length), so
+/// it is robust to snaplen truncation. `ip` is the IP header onward.
+fn tcp_session(ip: &[u8], is_v6: bool, s: &mut Stats) {
+    // Locate L4, on-wire total length, and addresses.
+    let (l4off, total_len, saddr, daddr) = if !is_v6 {
+        if ip.len() < 20 {
+            return;
+        }
+        let ihl = ((ip[0] & 0x0f) as usize) * 4;
+        if ihl < 20 {
+            return;
+        }
+        let total = u16::from_be_bytes([ip[2], ip[3]]) as usize;
+        let sa = u32::from_be_bytes([ip[12], ip[13], ip[14], ip[15]]) as u128;
+        let da = u32::from_be_bytes([ip[16], ip[17], ip[18], ip[19]]) as u128;
+        (ihl, total, sa, da)
+    } else {
+        if ip.len() < 40 {
+            return;
+        }
+        let payload = u16::from_be_bytes([ip[4], ip[5]]) as usize;
+        let mut a = [0u8; 16];
+        a.copy_from_slice(&ip[8..24]);
+        let sa = u128::from_be_bytes(a);
+        a.copy_from_slice(&ip[24..40]);
+        let da = u128::from_be_bytes(a);
+        (40, 40 + payload, sa, da) // note: IPv6 extension headers are not walked (rare for TCP)
+    };
+    let l4 = match ip.get(l4off..) {
+        Some(x) if x.len() >= 20 => x,
+        _ => return,
+    };
+    let sport = u16::from_be_bytes([l4[0], l4[1]]);
+    let dport = u16::from_be_bytes([l4[2], l4[3]]);
+    let seq = u32::from_be_bytes([l4[4], l4[5], l4[6], l4[7]]);
+    let ackn = u32::from_be_bytes([l4[8], l4[9], l4[10], l4[11]]);
+    let doff = ((l4[12] >> 4) as usize) * 4;
+    let flags = l4[13];
+    let (syn, ack, fin) = (flags & 0x02 != 0, flags & 0x10 != 0, flags & 0x01 != 0);
+    let payload = total_len.saturating_sub(l4off).saturating_sub(doff);
+    // Inner-length truncation: the IP header claims more bytes than were
+    // captured — a tunnel/MTU or snaplen cut that loses payload for reassembly.
+    if total_len > ip.len() {
+        s.inner_trunc += 1;
+    }
+    // SYN and FIN each consume one sequence number.
+    let seg = payload + syn as usize + fin as usize;
+
+    // Canonical key + direction (which endpoint is the sender of this segment).
+    let a = (saddr, sport);
+    let b = (daddr, dport);
+    let (lo, hi, dir) = if a <= b {
+        (a, b, 0usize)
+    } else {
+        (b, a, 1usize)
+    };
+    let key = flow_hash(lo, hi);
+    if !s.flows.contains_key(&key) && s.flows.len() >= 200_000 {
+        return; // bound memory
+    }
+    let f = s.flows.entry(key).or_default();
+
+    if syn && !ack {
+        f.saw_syn = true;
+    }
+    if syn && ack {
+        f.saw_synack = true;
+    }
+    if !syn && payload > 0 && !f.saw_syn && !f.saw_synack {
+        f.saw_data_no_syn = true;
+    }
+
+    // Sequence-gap = capture drop: this segment starts beyond what we expected
+    // next in this direction. A backward/equal seq is a retransmit or reorder,
+    // not a missing segment, so it is not counted.
+    if let Some(exp) = f.next_seq[dir] {
+        let gap = seq.wrapping_sub(exp);
+        if gap > 0 && gap < 16_000_000 {
+            s.seq_gaps += 1;
+        }
+    }
+    // ACKed-unseen = capture drop: this segment acknowledges peer data whose
+    // sequence end we never captured (RFC 9293 §3.4; Wireshark "ACKed segment
+    // that wasn't captured"). Counts only a forward jump beyond the highest
+    // peer sequence seen, so retransmits/normal ACKs are ignored.
+    if ack {
+        if let Some(peer_end) = f.next_seq[1 - dir] {
+            let ahead = ackn.wrapping_sub(peer_end);
+            if ahead > 0 && ahead < 16_000_000 {
+                s.acked_unseen += 1;
+            }
+        }
+    }
+    let end = seq.wrapping_add(seg as u32);
+    match f.next_seq[dir] {
+        Some(cur) if end.wrapping_sub(cur) >= 0x8000_0000 => {} // don't move expected backward
+        _ => f.next_seq[dir] = Some(end),
+    }
+}
+
+/// Fold per-flow TCP state into the finalized session tallies.
+fn finalize_flows(s: &mut Stats) {
+    s.tcp_flows = s.flows.len() as u64;
+    for f in s.flows.values() {
+        if f.saw_syn && f.saw_synack {
+            s.hs_complete += 1;
+        } else if f.saw_syn && !f.saw_synack {
+            s.hs_syn_only += 1;
+        } else if f.saw_data_no_syn {
+            s.hs_midstream += 1;
+        }
+    }
+}
+
 /// SPAN double-capture detector: a frame whose inner L3 bytes (addresses, IP
 /// id, flags, length, payload) recur within 5 ms is a mirror duplicate, not a
 /// real retransmission (which would arrive ≥ one RTO later).
@@ -604,9 +772,17 @@ fn dedup(ipslice: &[u8], ts: Option<f64>, s: &mut Stats) {
 }
 
 /// Parse the whole capture and produce the full report.
+/// Analyze an in-memory capture (GUI upload path, and tests).
 fn analyze(data: &[u8]) -> Report {
-    let total = data.len();
-    let (fmt_opt, ts_scale) = detect_format(data);
+    analyze_core(data, data, data.len())
+}
+
+/// Core analyzer over any byte source. `magic` holds the first bytes (for format
+/// detection), `src` streams the whole capture, `total` is the file size (for the
+/// consumed/total score). Streaming from a `File` keeps multi-GB captures out of
+/// RAM; an in-memory slice passes itself as both `magic` and `src`.
+fn analyze_core<R: std::io::Read>(magic: &[u8], src: R, total: usize) -> Report {
+    let (fmt_opt, ts_scale) = detect_format(magic);
 
     let mut r = Report {
         format: "unknown".into(),
@@ -624,8 +800,8 @@ fn analyze(data: &[u8]) -> Report {
         duration: 0.0,
         has_time: false,
         ver: "-".into(),
-        endian: magic_info(data).0,
-        ts_prec: magic_info(data).1,
+        endian: magic_info(magic).0,
+        ts_prec: magic_info(magic).1,
         iface_count: 0,
         wire_bytes: 0,
         stats: Stats::default(),
@@ -645,8 +821,10 @@ fn analyze(data: &[u8]) -> Report {
     };
     r.format = format.into();
 
-    let capacity = total + 65536;
-    let mut reader = match create_reader(capacity, data) {
+    // Bounded reader buffer: streams the source in ≤16 MB windows (refill loop
+    // below tops it up), so memory stays flat regardless of capture size.
+    let capacity = (total + 65536).min(16 * 1024 * 1024);
+    let mut reader = match create_reader(capacity, src) {
         Ok(rd) => rd,
         Err(e) => {
             r.note = format!("reader init failed: {e:?}");
@@ -674,6 +852,7 @@ fn analyze(data: &[u8]) -> Report {
                     PcapBlockOwned::Legacy(b) => {
                         r.packets += 1;
                         r.wire_bytes += b.origlen as u64;
+                        note_framelen(&mut r.stats, b.origlen);
                         if b.origlen > b.caplen {
                             r.truncated_pkts += 1;
                         }
@@ -698,6 +877,7 @@ fn analyze(data: &[u8]) -> Report {
                     PcapBlockOwned::NG(Block::EnhancedPacket(ep)) => {
                         r.packets += 1;
                         r.wire_bytes += ep.origlen as u64;
+                        note_framelen(&mut r.stats, ep.origlen);
                         if ep.origlen > ep.caplen {
                             r.truncated_pkts += 1;
                         }
@@ -709,6 +889,7 @@ fn analyze(data: &[u8]) -> Report {
                     PcapBlockOwned::NG(Block::SimplePacket(sp)) => {
                         r.packets += 1;
                         r.wire_bytes += sp.origlen as u64;
+                        note_framelen(&mut r.stats, sp.origlen);
                         let lk = interfaces.first().copied().unwrap_or(1);
                         analyze_packet(sp.data, lk, None, &mut r.stats);
                     }
@@ -765,6 +946,7 @@ fn analyze(data: &[u8]) -> Report {
         r.has_time = true;
     }
 
+    finalize_flows(&mut r.stats);
     build_checks(&mut r);
     build_notices(&mut r);
     r
@@ -779,7 +961,58 @@ fn build_notices(r: &mut Report) {
                 code: "span_double_capture",
                 title: "SPAN double-capture (TX + RX)".into(),
                 text: format!(
-                    "{pct}% of frames recur byte-identically (same endpoints, flags, length and payload) within 5 ms — the port-mirror is capturing BOTH TX and RX of the same segment, so each frame appears twice. Wireshark reads the second copy as a TCP retransmission, but these are capture artifacts, not real retransmissions (a real retransmit arrives ≥ one RTO later). Set the SPAN/ERSPAN source to RX-only (or TX-only) to remove them."
+                    "{pct}% of frames recur byte-identically (same endpoints, flags, length and payload) within 5 ms — the port-mirror is capturing BOTH TX and RX of the same segment, so each frame appears twice. Wireshark reads the second copy as a TCP retransmission, but these are capture artifacts, not real retransmissions (a real retransmit arrives ≥ one RTO later). Set the SPAN/ERSPAN source to RX-only (or TX-only) to remove them. [Source: Keysight/Gigamon SPAN de-duplication; packet-foo.com; editcap(1) -d]"
+                ),
+            });
+        }
+
+        // Offload super-frames (TSO/GRO): frames far above the 1518 B Ethernet MTU
+        // never existed on the wire — the capture host reassembled them.
+        let ov_pct = (r.stats.oversize as f64 * 100.0 / r.packets as f64).round() as u64;
+        if r.stats.oversize > 0 && ov_pct >= 1 {
+            r.notices.push(Notice {
+                code: "offload_superframes",
+                title: "NIC offload artifacts (TSO/GRO)".into(),
+                text: format!(
+                    "{}% of frames exceed the 1518 B Ethernet MTU — captured on an endpoint where TSO/GSO/GRO/LRO hand libpcap 2.9–64 KB pseudo-frames that were never on the wire. This breaks target-based IDS reassembly (insertion/evasion). Disable offload on the capture NIC (ethtool -K if gso off gro off tso off lro off) or capture at a TAP. [Source: Wireshark 'Offloading' wiki; Suricata Packet Capture docs]",
+                    ov_pct
+                ),
+            });
+        }
+
+        // VXLAN on the legacy Linux port 8472 instead of the RFC 7348 port 4789.
+        if r.stats.vxlan_legacy > 0 {
+            r.notices.push(Notice {
+                code: "vxlan_legacy_port",
+                title: "VXLAN on legacy UDP 8472".into(),
+                text: format!(
+                    "{} VXLAN frames use UDP port 8472 (Linux/flannel/old-OVS legacy) instead of the IANA/RFC 7348 port 4789. Sensors that only decode 4789 (Wireshark, Suricata, Zeek defaults) would see one giant UDP flow and miss every inner host. Add 8472 to the decoder's VXLAN ports. [Source: RFC 7348 §5; Suricata decoder.vxlan; Zeek vxlan_ports]",
+                    grp(r.stats.vxlan_legacy)
+                ),
+            });
+        }
+
+        // RFC 7348 §5 violation: VXLAN header with the 'I' flag clear (invalid VNI).
+        if r.stats.vxlan_bad > 0 {
+            r.notices.push(Notice {
+                code: "vxlan_rfc7348_iflag",
+                title: "Malformed VXLAN header (RFC 7348 violation)".into(),
+                text: format!(
+                    "{} VXLAN frames carry a header whose 'I' flag is not set — RFC 7348 §5 requires it to be 1 for the VNI to be valid. Strict decoders may reject these frames, hiding the inner hosts. [Source: RFC 7348 §5]",
+                    grp(r.stats.vxlan_bad)
+                ),
+            });
+        }
+
+        // Inner-length truncation: IP total-length exceeds the captured bytes.
+        let it_pct = (r.stats.inner_trunc as f64 * 100.0 / r.packets as f64).round() as u64;
+        if r.stats.inner_trunc > 0 && it_pct >= 1 {
+            r.notices.push(Notice {
+                code: "inner_truncation",
+                title: "Truncated segments (inner IP length > captured)".into(),
+                text: format!(
+                    "{}% of TCP packets carry an IP total-length larger than the bytes actually captured — snaplen or a tunnel/mirror MTU cut the payload. Reassembly, file extraction and IDS content matching run on incomplete data. Capture with -s 0 and raise the mirror-path MTU above the encapsulation overhead (VXLAN +50 B, ERSPAN +50–62 B). [Source: RFC 7348 / ERSPAN draft-foschiano-erspan; tcpdump(1) snaplen; SANS ISC]",
+                    it_pct
                 ),
             });
         }
@@ -810,6 +1043,36 @@ fn build_notices(r: &mut Report) {
     }
     let mean = if cnt > 0.0 { sum / cnt } else { 0.0 };
     r.conformance = (mean * 100.0).min(r.score);
+}
+
+/// How PicoCap runs, shown on every report and in the GUI so reviewers know the
+/// data never leaves the machine and where the detection logic comes from.
+const TRUST_NOTE: &str = "Processed locally — no packet data leaves this machine and no cloud service is contacted. Every check is a deterministic local algorithm, developed with the help of Claude and calibrated against a golden set of real captures cross-checked with tshark.";
+
+/// Authoritative source (RFC / vendor / expert) behind each criterion, shown with
+/// the result so a reviewer can verify the reasoning independently.
+fn finding_source(label: &str) -> &'static str {
+    match label {
+        l if l.starts_with("Format") => "pcap/pcapng file format (IETF opsawg pcapng draft; libpcap)",
+        l if l.starts_with("Container integrity") => "libpcap/pcapng block structure; pcapfix",
+        l if l.starts_with("Full-packet") => "tcpdump(1) snaplen (-s 0); SANS ISC — snaplen truncation",
+        l if l.starts_with("Size") => "PCAP Collection Guide (per-file size); packet-foo.com capture playbook",
+        l if l.starts_with("Multiple end devices") => "Wireshark Wiki — SPAN/mirror & promiscuous mode; Security Onion sniffing pitfalls",
+        l if l.starts_with("Representative") => "packet-foo.com capture playbook (representative window)",
+        l if l.starts_with("No capture drops") => "RFC 9293 (TCP) §3.4; Wireshark Expert 'ACKed segment that wasn't captured' / 'previous segment not captured'; Zeek capture_loss.log",
+        l if l.starts_with("TCP session coverage") => "RFC 9293 (TCP) §3.5 three-way handshake; Wireshark tcp.analysis",
+        _ => "",
+    }
+}
+
+/// Tally on-wire frame length anomalies (runt = below the 60 B Ethernet floor,
+/// oversize = above the 1518 B standard MTU) — a capture/L2 usability signal.
+fn note_framelen(s: &mut Stats, origlen: u32) {
+    if origlen < 60 {
+        s.runts += 1;
+    } else if origlen > 1518 {
+        s.oversize += 1;
+    }
 }
 
 fn note_ts(s: &mut Stats, ts: f64) {
@@ -992,6 +1255,45 @@ fn build_checks(r: &mut Report) {
         }
     }
 
+    // 7) Capture completeness (TCP): sequence gaps = segments the endpoints
+    //    exchanged but the file is missing (SPAN/collector drop). Usability, not
+    //    a network-fault verdict — network-side loss analysis lives in apex.ai.
+    if known && r.stats.tcp_flows > 0 {
+        let drops = r.stats.seq_gaps + r.stats.acked_unseen;
+        let (lvl, det) = if drops == 0 {
+            (
+                "pass",
+                format!(
+                    "{} TCP sessions, no sequence gaps or ACKed-unseen segments — capture is byte-complete",
+                    r.stats.tcp_flows
+                ),
+            )
+        } else {
+            (
+                "warn",
+                format!(
+                    "{} sequence gaps + {} ACKed-unseen segments across {} TCP sessions — segment(s) missing from the file (capture/SPAN drop). Recapture at a point that sees full throughput.",
+                    r.stats.seq_gaps, r.stats.acked_unseen, r.stats.tcp_flows
+                ),
+            )
+        };
+        c.push(Check {
+            level: lvl,
+            label: "No capture drops (TCP seq)".into(),
+            detail: det,
+        });
+
+        // Handshake coverage (informational, not scored).
+        c.push(Check {
+            level: "info",
+            label: "TCP session coverage".into(),
+            detail: format!(
+                "{} complete handshake, {} SYN-only (one-directional capture?), {} mid-stream (capture started late)",
+                r.stats.hs_complete, r.stats.hs_syn_only, r.stats.hs_midstream
+            ),
+        });
+    }
+
     // Overall verdict from pass/warn/fail (info ignored).
     let has_fail = c.iter().any(|x| x.level == "fail");
     let has_warn = c.iter().any(|x| x.level == "warn");
@@ -1149,10 +1451,31 @@ fn markdown_report(name: &str, sha: &str, r: &Report) -> String {
     );
     let _ = writeln!(
         o,
-        "| Endpoints | {} distinct MAC · {} IP addresses |\n",
+        "| Endpoints | {} distinct MAC · {} IP addresses |",
         grp(r.src_macs as u64),
         grp(r.ip_addrs as u64)
     );
+    if s.tcp_flows > 0 {
+        let _ = writeln!(
+            o,
+            "| TCP sessions | {} total · {} complete handshake · {} SYN-only · {} mid-stream |",
+            grp(s.tcp_flows),
+            grp(s.hs_complete),
+            grp(s.hs_syn_only),
+            grp(s.hs_midstream)
+        );
+        let _ = writeln!(
+            o,
+            "| Capture completeness | {} seq gaps · {} ACKed-unseen · {} inner-truncated · {} runt · {} oversize |\n",
+            grp(s.seq_gaps),
+            grp(s.acked_unseen),
+            grp(s.inner_trunc),
+            grp(s.runts),
+            grp(s.oversize)
+        );
+    } else {
+        let _ = writeln!(o);
+    }
     let _ = writeln!(o, "## 4  Encapsulation chains (count / %)\n");
     let mut cv: Vec<(&String, &u64)> = s.chains.iter().collect();
     cv.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
@@ -1236,8 +1559,17 @@ fn markdown_report(name: &str, sha: &str, r: &Report) -> String {
         "{}",
         m("Data on wire", human_bytes(r.wire_bytes as usize))
     );
-    let _ = writeln!(o, "\n## 6  Basis and disclaimer\n");
-    let _ = writeln!(o, "Criteria basis: PCAP Collection Guide (format, full-frame capture, per-file size, endpoint diversity and representative duration). Duplicate-frame detection flags frames whose inner L3 content recurs within the configured time window (TX+RX mirroring). Thresholds are configurable. This automated report contains no manual review and does not constitute a certification.\n");
+    let _ = writeln!(o, "\n## 6  Sources per finding\n");
+    let _ = writeln!(o, "| Requirement | Source |\n|---|---|");
+    for c in r.checks.iter() {
+        let src = finding_source(&c.label);
+        if !src.is_empty() {
+            let _ = writeln!(o, "| {} | {} |", md_esc(&c.label), md_esc(src));
+        }
+    }
+    let _ = writeln!(o, "\n## 7  Basis and disclaimer\n");
+    let _ = writeln!(o, "Criteria basis: PCAP Collection Guide (format, full-frame capture, per-file size, endpoint diversity and representative duration). TCP session integrity follows RFC 9293 (handshake, sequence numbers); tunnel/encapsulation conformance follows RFC 7348 (VXLAN) and the ERSPAN draft. Thresholds are configurable. This automated report contains no manual review and does not constitute a certification.\n");
+    let _ = writeln!(o, "> **How this runs:** {TRUST_NOTE}\n");
     let _ = writeln!(
         o,
         "_Prepared by PicoCap v{VERSION} \"{CODENAME}\" (automated) · {issued}_"
@@ -1247,9 +1579,46 @@ fn markdown_report(name: &str, sha: &str, r: &Report) -> String {
 
 // ---------- CLI ----------
 
+/// Stream a file's SHA-256 in 1 MiB windows — never loads the whole file.
+fn sha256_file(path: &str) -> std::io::Result<String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut f = std::fs::File::open(path)?;
+    let mut h = Sha256::new();
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let n = f.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        h.update(&buf[..n]);
+    }
+    Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Analyze a capture by streaming it from disk (bounded memory for multi-GB
+/// files). Reads a small header for format detection, then re-joins it with the
+/// rest of the file as the parse stream.
+fn analyze_reader(path: &str, total: usize) -> std::io::Result<Report> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path)?;
+    let mut magic = vec![0u8; 65536.min(total.max(1))];
+    let mut got = 0;
+    while got < magic.len() {
+        let n = f.read(&mut magic[got..])?;
+        if n == 0 {
+            break;
+        }
+        got += n;
+    }
+    magic.truncate(got);
+    let src = std::io::Cursor::new(magic.clone()).chain(f);
+    Ok(analyze_core(&magic, src, total))
+}
+
 fn run_cli(path: &str) -> i32 {
-    let data = match std::fs::read(path) {
-        Ok(d) => d,
+    let total = match std::fs::metadata(path) {
+        Ok(m) => m.len() as usize,
         Err(e) => {
             eprintln!("cannot read {path}: {e}");
             return 2;
@@ -1259,8 +1628,20 @@ fn run_cli(path: &str) -> i32 {
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| path.to_string());
-    let sha = sha256_hex(&data);
-    let r = analyze(&data);
+    let sha = match sha256_file(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("cannot read {path}: {e}");
+            return 2;
+        }
+    };
+    let r = match analyze_reader(path, total) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("cannot read {path}: {e}");
+            return 2;
+        }
+    };
     let s = &r.stats;
 
     let bar_len = 28usize;
@@ -1422,10 +1803,11 @@ async fn check(mut mp: axum::extract::Multipart) -> axum::response::Response {
         .iter()
         .map(|c| {
             format!(
-                "{{\"level\":\"{}\",\"label\":{},\"detail\":{}}}",
+                "{{\"level\":\"{}\",\"label\":{},\"detail\":{},\"source\":{}}}",
                 c.level,
                 json_str(&c.label),
-                json_str(&c.detail)
+                json_str(&c.detail),
+                json_str(finding_source(&c.label))
             )
         })
         .collect::<Vec<_>>()
@@ -1472,7 +1854,7 @@ async fn check(mut mp: axum::extract::Multipart) -> axum::response::Response {
         .join(",");
 
     let json = format!(
-        "{{\"name\":{name},\"format\":\"{fmt}\",\"linktype\":{lt},\"packets\":{pk},\"consumed\":{cons},\"total\":{tot},\"score\":{sc:.1},\"conformance\":{conf:.1},\"clean\":{cl},\"note\":{nt},\"sha256\":\"{sha}\",\"intake\":\"{intake}\",\"snaplen\":{snap},\"truncated\":{trunc},\"src_macs\":{macs},\"ip_addrs\":{ips},\"duration\":{dur:.1},\"has_time\":{ht},\"meta\":{{\"ver\":{ver},\"endian\":\"{endian}\",\"ts_prec\":\"{prec}\",\"ifaces\":{ifc},\"snaplen\":{snap},\"linktype\":{lt},\"start\":\"{start}\",\"end\":\"{end}\",\"duration_h\":{dur:.1},\"wire_bytes\":{wire},\"avg_pkt\":{avg},\"rate_bps\":{rate:.0}}},\"dist\":{{\"unicast\":{uni},\"multicast\":{mc},\"broadcast\":{bc},\"ipv4\":{v4},\"ipv6\":{v6},\"arp\":{arp},\"vlan\":{vlan},\"gre\":{gre},\"erspan\":{ers},\"vxlan\":{vx},\"geneve\":{gen},\"decoded\":{dec},\"dup_frames\":{dupf},\"dup_pct\":{dupp:.1},\"qinq\":{qinq},\"vlan_ids\":{vids},\"max_depth\":{mdep},\"multi_encap\":{menc}}},\"chains\":[{chains_json}],\"checks\":[{checks}],\"notices\":[{notices}],\"report_md\":{rmd}}}",
+        "{{\"name\":{name},\"format\":\"{fmt}\",\"linktype\":{lt},\"packets\":{pk},\"consumed\":{cons},\"total\":{tot},\"score\":{sc:.1},\"conformance\":{conf:.1},\"clean\":{cl},\"note\":{nt},\"sha256\":\"{sha}\",\"intake\":\"{intake}\",\"snaplen\":{snap},\"truncated\":{trunc},\"src_macs\":{macs},\"ip_addrs\":{ips},\"duration\":{dur:.1},\"has_time\":{ht},\"meta\":{{\"ver\":{ver},\"endian\":\"{endian}\",\"ts_prec\":\"{prec}\",\"ifaces\":{ifc},\"snaplen\":{snap},\"linktype\":{lt},\"start\":\"{start}\",\"end\":\"{end}\",\"duration_h\":{dur:.1},\"wire_bytes\":{wire},\"avg_pkt\":{avg},\"rate_bps\":{rate:.0}}},\"dist\":{{\"unicast\":{uni},\"multicast\":{mc},\"broadcast\":{bc},\"ipv4\":{v4},\"ipv6\":{v6},\"arp\":{arp},\"vlan\":{vlan},\"gre\":{gre},\"erspan\":{ers},\"vxlan\":{vx},\"geneve\":{gen},\"decoded\":{dec},\"dup_frames\":{dupf},\"dup_pct\":{dupp:.1},\"qinq\":{qinq},\"vlan_ids\":{vids},\"max_depth\":{mdep},\"multi_encap\":{menc}}},\"session\":{{\"tcp_flows\":{tcpf},\"handshake_complete\":{hsc},\"syn_only\":{hso},\"mid_stream\":{hsm},\"seq_gaps\":{gaps},\"acked_unseen\":{aunseen},\"inner_trunc\":{itrunc},\"vxlan_legacy\":{vxleg},\"runts\":{runt},\"oversize\":{ovsz}}},\"trust\":{trust},\"chains\":[{chains_json}],\"checks\":[{checks}],\"notices\":[{notices}],\"report_md\":{rmd}}}",
         name = json_str(&name),
         fmt = r.format,
         lt = json_str(&r.linktype),
@@ -1517,6 +1899,17 @@ async fn check(mut mp: axum::extract::Multipart) -> axum::response::Response {
         vids = s.vlan_ids.len(),
         mdep = s.max_depth,
         menc = s.multi_encap,
+        tcpf = s.tcp_flows,
+        hsc = s.hs_complete,
+        hso = s.hs_syn_only,
+        hsm = s.hs_midstream,
+        gaps = s.seq_gaps,
+        aunseen = s.acked_unseen,
+        itrunc = s.inner_trunc,
+        vxleg = s.vxlan_legacy,
+        runt = s.runts,
+        ovsz = s.oversize,
+        trust = json_str(TRUST_NOTE),
         rmd = json_str(&report_md),
     );
     (
@@ -1671,8 +2064,8 @@ fn main() {
                 eprintln!("usage: picocap --report <file>   (writes a Markdown report to stdout)");
                 std::process::exit(2);
             };
-            let data = match std::fs::read(path) {
-                Ok(d) => d,
+            let total = match std::fs::metadata(path) {
+                Ok(m) => m.len() as usize,
                 Err(e) => {
                     eprintln!("cannot read {path}: {e}");
                     std::process::exit(2);
@@ -1682,8 +2075,13 @@ fn main() {
                 .file_name()
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_else(|| path.clone());
-            let sha = sha256_hex(&data);
-            let r = analyze(&data);
+            let (sha, r) = match (sha256_file(path), analyze_reader(path, total)) {
+                (Ok(sha), Ok(r)) => (sha, r),
+                _ => {
+                    eprintln!("cannot read {path}");
+                    std::process::exit(2);
+                }
+            };
             print!("{}", markdown_report(&name, &sha, &r));
         }
         Some("-h") | Some("--help") | None => {
@@ -1754,6 +2152,156 @@ mod tests {
     // an inner Ethernet frame carrying IPv4/TCP
     fn inner_ip_tcp(id: u16, pad: u8) -> Vec<u8> {
         eth(M2, M1, 0x0800, &ipv4(6, id, &tcp(pad)))
+    }
+
+    // IPv4 header with explicit src/dst (the fixed-address `ipv4` can't reverse).
+    fn ipv4_full(src: [u8; 4], dst: [u8; 4], proto: u8, payload: &[u8]) -> Vec<u8> {
+        let mut h = vec![0x45, 0x00];
+        h.extend(((20 + payload.len()) as u16).to_be_bytes());
+        h.extend([0, 0, 0x40, 0x00, 0x40, proto, 0, 0]);
+        h.extend(src);
+        h.extend(dst);
+        h.extend(payload);
+        h
+    }
+    // A 20-byte TCP header (data offset 5) + payload. flags: SYN 0x02, ACK 0x10, FIN 0x01.
+    fn tcp_seg(sport: u16, dport: u16, seq: u32, ack: u32, flags: u8, payload: &[u8]) -> Vec<u8> {
+        let mut t = Vec::new();
+        t.extend(sport.to_be_bytes());
+        t.extend(dport.to_be_bytes());
+        t.extend(seq.to_be_bytes());
+        t.extend(ack.to_be_bytes());
+        t.push(0x50); // data offset = 5 words (20 B)
+        t.push(flags);
+        t.extend(8192u16.to_be_bytes()); // window
+        t.extend([0, 0, 0, 0]); // checksum + urgent
+        t.extend(payload);
+        t
+    }
+    // A full Ethernet/IPv4/TCP frame between client 10.0.0.1 and server 10.0.0.2.
+    fn frame_tcp(
+        from_client: bool,
+        sport: u16,
+        dport: u16,
+        seq: u32,
+        ack: u32,
+        flags: u8,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let (src, dst, smac, dmac) = if from_client {
+            ([10, 0, 0, 1], [10, 0, 0, 2], M1, M2)
+        } else {
+            ([10, 0, 0, 2], [10, 0, 0, 1], M2, M1)
+        };
+        eth(
+            dmac,
+            smac,
+            0x0800,
+            &ipv4_full(
+                src,
+                dst,
+                6,
+                &tcp_seg(sport, dport, seq, ack, flags, payload),
+            ),
+        )
+    }
+
+    #[test]
+    fn tcp_handshake_and_capture_drop() {
+        // SYN, SYN-ACK, ACK, data(100B), then a segment that skips 200 B forward
+        // (a captured-side gap) — one complete handshake, one sequence gap.
+        let (cp, sp) = (12345u16, 502u16);
+        let recs = vec![
+            (1u32, 0u32, frame_tcp(true, cp, sp, 1000, 0, 0x02, &[])), // SYN
+            (1, 1, frame_tcp(false, sp, cp, 5000, 1001, 0x12, &[])),   // SYN-ACK
+            (1, 2, frame_tcp(true, cp, sp, 1001, 5001, 0x10, &[])),    // ACK
+            (1, 3, frame_tcp(true, cp, sp, 1001, 5001, 0x18, &[7u8; 100])), // data -> next 1101
+            (1, 4, frame_tcp(true, cp, sp, 1301, 5001, 0x18, &[7u8; 50])), // GAP: expected 1101
+        ];
+        let r = analyze(&pcap(&recs));
+        assert_eq!(r.stats.tcp_flows, 1, "one TCP session");
+        assert_eq!(r.stats.hs_complete, 1, "complete handshake");
+        assert_eq!(r.stats.hs_syn_only, 0);
+        assert_eq!(
+            r.stats.seq_gaps, 1,
+            "one forward sequence gap = capture drop"
+        );
+        assert!(
+            r.checks
+                .iter()
+                .any(|c| c.label.starts_with("No capture drops") && c.level == "warn"),
+            "capture-drop check should warn"
+        );
+    }
+
+    #[test]
+    fn streaming_matches_in_memory() {
+        // The CLI streams via analyze_core over a chunked reader; the GUI uses
+        // the in-memory slice. Both must yield identical results.
+        let (cp, sp) = (12345u16, 502u16);
+        let recs = vec![
+            (1u32, 0u32, frame_tcp(true, cp, sp, 1000, 0, 0x02, &[])),
+            (1, 1, frame_tcp(false, sp, cp, 5000, 1001, 0x12, &[])),
+            (1, 2, frame_tcp(true, cp, sp, 1001, 5001, 0x18, &[7u8; 100])),
+            (1, 3, frame_tcp(true, cp, sp, 1301, 5001, 0x18, &[7u8; 50])),
+        ];
+        let bytes = pcap(&recs);
+        let mem = analyze(&bytes);
+        // stream the same bytes through a small-window reader (magic = first 24 B)
+        let magic = &bytes[..24.min(bytes.len())];
+        let strm = analyze_core(magic, std::io::Cursor::new(bytes.clone()), bytes.len());
+        assert_eq!(mem.packets, strm.packets);
+        assert_eq!(mem.stats.tcp_flows, strm.stats.tcp_flows);
+        assert_eq!(mem.stats.seq_gaps, strm.stats.seq_gaps);
+        assert_eq!(mem.stats.hs_complete, strm.stats.hs_complete);
+        assert_eq!(mem.conformance, strm.conformance);
+    }
+
+    #[test]
+    fn tcp_acked_unseen() {
+        // Handshake, then the client ACKs 100 B of server data that the capture
+        // never recorded — an ACKed-unseen segment (RFC 9293 §3.4 capture drop).
+        let (cp, sp) = (30000u16, 502u16);
+        let recs = vec![
+            (1u32, 0u32, frame_tcp(true, cp, sp, 1000, 0, 0x02, &[])), // SYN
+            (1, 1, frame_tcp(false, sp, cp, 5000, 1001, 0x12, &[])),   // SYN-ACK
+            (1, 2, frame_tcp(true, cp, sp, 1001, 5001, 0x10, &[])),    // normal ACK
+            // server data 5001..5101 is missing from the capture
+            (1, 3, frame_tcp(true, cp, sp, 1001, 5101, 0x10, &[])), // ACK for unseen 100 B
+        ];
+        let r = analyze(&pcap(&recs));
+        assert_eq!(r.stats.acked_unseen, 1, "one ACK for data never captured");
+        assert_eq!(r.stats.seq_gaps, 0, "no client-side data gap");
+    }
+
+    #[test]
+    fn inner_length_truncation() {
+        // IP total-length claims 200 B but only a 20 B TCP header is present.
+        let mut ip = vec![0x45, 0x00];
+        ip.extend(200u16.to_be_bytes()); // total_length = 200 (exceeds captured)
+        ip.extend([0, 0, 0x40, 0x00, 0x40, 6, 0, 0]);
+        ip.extend([10, 0, 0, 1, 10, 0, 0, 2]);
+        ip.extend(tcp_seg(1111, 502, 1, 0, 0x10, &[])); // 20 B L4, no payload
+        let frame = eth(M2, M1, 0x0800, &ip);
+        let r = analyze(&pcap(&[(1u32, 0u32, frame)]));
+        assert_eq!(
+            r.stats.inner_trunc, 1,
+            "inner IP length exceeds captured bytes"
+        );
+    }
+
+    #[test]
+    fn tcp_clean_session_no_gap() {
+        // A clean, in-order half-session: SYN then contiguous data, no gaps.
+        let (cp, sp) = (40000u16, 44818u16);
+        let recs = vec![
+            (1u32, 0u32, frame_tcp(true, cp, sp, 100, 0, 0x02, &[])), // SYN -> next 101
+            (1, 1, frame_tcp(true, cp, sp, 101, 0, 0x10, &[9u8; 40])), // 101..141
+            (1, 2, frame_tcp(true, cp, sp, 141, 0, 0x10, &[9u8; 40])), // 141..181 contiguous
+        ];
+        let r = analyze(&pcap(&recs));
+        assert_eq!(r.stats.seq_gaps, 0, "contiguous stream has no gaps");
+        assert_eq!(r.stats.hs_syn_only, 1, "SYN seen but no SYN-ACK");
     }
 
     fn vlan(dst: [u8; 6], vid: u16, inner_et: u16, inner: &[u8]) -> Vec<u8> {

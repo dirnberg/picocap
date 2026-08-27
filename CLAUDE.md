@@ -2,11 +2,17 @@
 
 Tiny **read-only** PCAP/PCAPNG intake checker (Rust, CLI + embedded web GUI).
 Checks a capture against the PCAP Collection Guide: conformance score,
-VLAN/GRE/ERSPAN/VXLAN breakdown, encapsulation-chain distribution, and
-**SPAN double-capture (TX+RX)** detection. Never rewrites or forwards files.
+VLAN/GRE/ERSPAN/VXLAN breakdown, encapsulation-chain distribution,
+**SPAN double-capture (TX+RX)** detection, and (v1.1) **TCP session integrity** —
+handshake coverage + **capture-drop (sequence-gap)** detection + runt/oversize.
+Multi-GB captures stream from disk (CLI, ~flat memory). Never rewrites or forwards.
 
-- Repo: https://github.com/dirnberg/picocap · release `v1.0.0 "Groundhog"`
+- Repo: https://github.com/dirnberg/picocap · release `v1.2.0 "Foxhound"`
 - Pure Rust: `pcap-parser`, `sha2`, `axum`. No `libpcap`, no system deps.
+- Scope line: capture *usability* only. Network-fault verdicts (retrans storms,
+  routing loops, DNS/RST-storms, dup-IP) belong to **apex.ai**, not here.
+- `src/main.rs`: `analyze_core<R: Read>` is the shared analyzer; CLI streams via
+  `analyze_reader` (bounded memory), GUI passes the in-memory upload slice.
 
 ## Layout
 - `src/main.rs` — CLI, decoder, checks, HTTP server, **and the test module** (`#[cfg(test)]`)

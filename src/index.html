@@ -92,6 +92,8 @@ body::before{content:"";position:fixed;inset:0;pointer-events:none;z-index:0;opa
 .chk:last-child{border-bottom:none}
 .chk .mk{width:22px;height:22px;flex:0 0 auto;border-radius:6px;display:grid;place-items:center;font-size:13px;font-weight:800}
 .chk .lb{font-weight:600;font-size:13.5px}.chk .dt{color:var(--mut);font-size:12px;margin-top:1px}
+.chk .src{color:var(--acc,#3fb6c8);font-size:11px;margin-top:2px;opacity:.75}
+.trust{margin-top:16px;padding:10px 14px;border:1px solid rgba(23,48,58,.6);border-radius:8px;color:var(--mut);font-size:11.5px;line-height:1.5}
 .mk.pass{background:rgba(47,240,154,.14);color:var(--ok)}.mk.warn{background:rgba(255,178,62,.16);color:var(--warn)}
 .mk.fail{background:rgba(255,77,100,.16);color:var(--bad)}.mk.info{background:rgba(25,224,216,.14);color:var(--cy)}
 .stack{display:flex;height:16px;border-radius:8px;overflow:hidden;border:1px solid var(--line);background:#0b141a}
@@ -145,7 +147,7 @@ body::before{content:"";position:fixed;inset:0;pointer-events:none;z-index:0;opa
    <circle cx="20" cy="20" r="2.5" fill="#19e0d8"/>
    <path d="M20 1v6M20 33v6M1 20h6M33 20h6" stroke="#19e0d8" stroke-width="2"/>
   </svg>
-  <div><h1>PICO<b>CAP</b></h1><p class="tag">Capture Intake Check · v1.0 “Groundhog”</p></div>
+  <div><h1>PICO<b>CAP</b></h1><p class="tag">Capture Intake Check · v1.2 “Foxhound”</p></div>
  </div>
 
  <div class="drop" id="drop">
@@ -272,13 +274,15 @@ function detailHTML(d,when){
  const notices=(d.notices&&d.notices.length)
   ?d.notices.map(n=>`<div class="notice"><div class="ic">⚠</div><div><h3>${esc(n.title)} <code>${esc(n.code)}</code></h3><p>${esc(n.text)}</p></div></div>`).join('')
   :`<div class="clean">✓ No capture-quality notices — traffic looks clean</div>`;
- const checks=d.checks.map(c=>`<div class="chk"><div class="mk ${c.level}">${mk[c.level]||'i'}</div><div><div class="lb">${esc(c.label)}</div><div class="dt">${esc(c.detail)}</div></div></div>`).join('');
+ const checks=d.checks.map(c=>`<div class="chk"><div class="mk ${c.level}">${mk[c.level]||'i'}</div><div><div class="lb">${esc(c.label)}</div><div class="dt">${esc(c.detail)}</div>${c.source?`<div class="src">↪ ${esc(c.source)}</div>`:''}</div></div>`).join('');
  const x=d.dist,cast=(x.unicast+x.multicast+x.broadcast)||1;
  const seg=[['var(--uni)',x.unicast,'Unicast'],['var(--multi)',x.multicast,'Multicast'],['var(--broad)',x.broadcast,'Broadcast']];
  const stack=seg.map(([c,v])=>`<i style="width:${v/cast*100}%;background:${c}"></i>`).join('');
  const legend=seg.map(([c,v,l])=>`<span><span class="sw" style="background:${c}"></span>${l} <b>${N(v)}</b></span>`).join('')
   +[['IPv4',x.ipv4],['IPv6',x.ipv6],['ARP',x.arp]].map(([l,v])=>`<span><span class="sw" style="background:#3a5561"></span>${l} <b>${N(v)}</b></span>`).join('');
  const enc=[['GRE',x.gre],['ERSPAN',x.erspan],['VXLAN',x.vxlan],['Geneve',x.geneve],['VLAN',x.vlan],['QinQ',x.qinq],['multi-encap',x.multi_encap]].map(([l,v])=>`<div class="chip ${v>0?'on':''}">${l} <b>${N(v)}</b></div>`).join('');
+ const S=d.session||{};
+ const sess=(S.tcp_flows>0)?[['TCP sessions',S.tcp_flows,false],['✓ handshake',S.handshake_complete,false],['SYN-only',S.syn_only,false],['mid-stream',S.mid_stream,false],['seq-gaps',S.seq_gaps,S.seq_gaps>0],['ACKed-unseen',S.acked_unseen,S.acked_unseen>0],['inner-trunc',S.inner_trunc,S.inner_trunc>0],['runts',S.runts,false]].map(([l,v,hot])=>`<div class="chip ${hot?'on':''}">${l} <b>${N(v)}</b></div>`).join(''):'';
  const chHTML=(d.chains&&d.chains.length)?(function(){const mx=Math.max.apply(null,d.chains.map(c=>c.pct));return d.chains.slice(0,10).map(c=>`<div class="chrow"><div class="chtrk"><i style="width:${Math.max(3,c.pct/mx*100)}%"></i></div><b>${c.pct.toFixed(1)}%</b><span class="chn">${N(c.count)}</span><code title="${esc(c.chain)}">${esc(c.chain)}</code></div>`).join('')})():'<div style="color:var(--mut);font-size:12px">No decodable Layer-2 chains.</div>';
  const m=d.meta,rate=m.rate_bps>0?(m.rate_bps/1e6).toFixed(2)+' Mbit/s':'–';
  const cells=[['Recorded start',m.start],['Recorded end',m.end],['Duration',m.duration_h>0?fmtDur(m.duration_h):'–'],['Throughput',rate],
@@ -302,10 +306,11 @@ function detailHTML(d,when){
   <div class="sec"><h2>Encapsulation chains &nbsp;·&nbsp; count / %</h2>${chHTML}</div>
   <div class="lower">
    <div class="sec"><h2>Collection criteria</h2>${checks}</div>
-   <div class="sec"><h2>Packet distribution</h2><div class="stack">${stack}</div><div class="legend">${legend}</div><div class="chips">${enc}</div></div>
+   <div class="sec"><h2>Packet distribution</h2><div class="stack">${stack}</div><div class="legend">${legend}</div><div class="chips">${enc}</div>${sess?`<h2 style="margin-top:14px">TCP sessions &nbsp;·&nbsp; capture completeness</h2><div class="chips">${sess}</div>`:''}</div>
    <div class="sec"><h2>Capture metadata</h2><div class="kv">${meta}</div></div>
    <div class="sec"><h2>File</h2><div class="file">${frows}</div></div>
-  </div>`;
+  </div>
+  <div class="trust">🔒 ${esc(d.trust||'')}</div>`;
 }
 
 /* ---- report export: the server (Rust markdown_report) is the single source; the GUI just downloads it ---- */
