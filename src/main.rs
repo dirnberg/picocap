@@ -2461,6 +2461,42 @@ mod tests {
         );
     }
 
+    /// Guard against stale version references: every `picocap:<x.y.z>` docker tag
+    /// in the docs and the README version badge must match the crate version. This
+    /// is what caught the docker-compose 1.0.0 pin — it now fails CI, not review.
+    #[test]
+    fn version_strings_are_consistent() {
+        let ver = env!("CARGO_PKG_VERSION");
+        let dir = env!("CARGO_MANIFEST_DIR");
+        for f in [
+            "README.md",
+            "SECURITY.md",
+            "docker-compose.yml",
+            "CLAUDE.md",
+        ] {
+            let txt = std::fs::read_to_string(format!("{dir}/{f}")).unwrap_or_default();
+            let mut rest = txt.as_str();
+            while let Some(i) = rest.find("picocap:") {
+                let tag: String = rest[i + 8..]
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit() || *c == '.')
+                    .collect();
+                if !tag.is_empty() {
+                    assert_eq!(
+                        tag, ver,
+                        "stale docker tag `picocap:{tag}` in {f} (want {ver})"
+                    );
+                }
+                rest = &rest[i + 8..];
+            }
+        }
+        let readme = std::fs::read_to_string(format!("{dir}/README.md")).unwrap_or_default();
+        assert!(
+            readme.contains(&format!("version-{ver}")),
+            "README version badge does not show {ver}"
+        );
+    }
+
     #[test]
     fn tcp_clean_session_no_gap() {
         // A clean, in-order half-session: SYN then contiguous data, no gaps.
