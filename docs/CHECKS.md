@@ -74,10 +74,34 @@ actually covered. **Source** RFC 9293 (TCP) §3.5 three-way handshake; Wireshark
 ## Capture-quality notices (encapsulation & RFC conformance)
 
 ### SPAN double-capture (TX + RX)
-Frames recur byte-identically within 5 ms — the mirror captures both TX and RX, so
-each frame appears twice (read as spurious retransmissions). Mirror RX-only or
+Frames recur within 5 ms whose inner L3 is identical once the router-rewritten
+fields (IPv4 ToS/TTL/checksum, IPv6 hop limit) are masked — the mirror captures
+both TX and RX, so each frame appears twice (read as spurious retransmissions).
+Masking those fields catches a **routed** both-direction mirror too, whose copies
+differ only in TTL, not just a switched byte-identical one. Mirror RX-only or
 TX-only. **Source** Keysight/Gigamon SPAN de-duplication; packet-foo.com;
 `editcap(1) -d`.
+
+### Capture source (informational)
+A fingerprint of where the file most likely came from — *tunnel mirror*
+(ERSPAN/GRE/VXLAN present), *host capture* (NIC-offload super-frames, or the
+tcpdump/dumpcap default snaplen 262144), or *local SPAN / unknown*. It is an
+inference from the metadata, **not** a verdict on the exact device. **Source**
+corpus study (host vs mirror captures separate cleanly); packet-foo.com.
+
+### Almost no unicast — mirror not seeing switched traffic
+Fires when <2 % of frames are unicast and >90 % are ARP/broadcast/multicast: the
+sniffer sees discovery noise but not the switched unicast conversations — a virtual
+bridge (Proxmox/ESXi/Hyper-V) is eating the mirror frames, hardware offload bypasses
+the sniffer, or the mirror source is wrong. Verify with a bare laptop + Wireshark.
+**Source** packet-foo.com; Security Onion; forum consensus.
+
+### Timestamp discontinuity / implausible timestamps
+A >1-day jump between consecutive frames means the file is a **merge/replay** of
+separate captures (timing unreliable, analyse the segments apart); an astronomical
+jump means a **broken capture clock** (e.g. a hardware-timestamping TAP whose
+dissector plugin is missing, so timestamps read as billions of seconds). **Source**
+packet-foo Multi-Point Capture; `mergecap(1)`; Profitap ProfiShark KB.
 
 ### NIC offload artifacts (TSO/GRO)
 Frames far above the 1518 B MTU never existed on the wire — the capture host
@@ -109,6 +133,6 @@ PicoCap checks **capture usability** and **encapsulation/transport RFC conforman
 (RFC 9293 TCP, RFC 7348 VXLAN). It does **not** run per-application RFC-violation or
 anomaly detection (Modbus, DNP3, HTTP, TLS state machines) or network-fault verdicts
 (retransmission storms, routing loops, DNS/RST-storms, duplicate-IP) — those are
-*findings about the network*, handled by the apex.ai passive analyzer, not here.
+*findings about the network*, out of scope for a capture-intake checker.
 PicoCap reports that a segment is *missing from the file*; it never claims *why the
 wire* lost a packet.

@@ -16,8 +16,8 @@ Multi-GB captures stream from disk (bounded memory).
 anomaly ML / detection rules. PicoCap only answers *"is this capture clean and
 usable?"*. It deliberately draws the line at capture usability: **network-fault
 verdicts** — retransmission storms, routing loops, DNS/RST-storms, duplicate-IP —
-are *findings about the network*, not the capture, and belong to **apex.ai** (the
-OT passive analyzer), not here. PicoCap reports a sequence *gap* (the file missed
+are *findings about the network*, not the capture, and are out of scope for a
+capture-intake checker. PicoCap reports a sequence *gap* (the file missed
 a segment); it never claims *why the wire* lost a packet.
 
 ## The cycle (as realized)

@@ -3,6 +3,17 @@
 Every shipped change to what PicoCap detects or how it runs, newest first.
 Each entry is backed by `cargo test` and a semantic version bump in `Cargo.toml`.
 
+## v1.3.0 "Wolfhound" — 2026-08-27
+
+**Capture-source fingerprint, mirror-blindness & timestamp-integrity checks, TTL-tolerant double-capture.** Grounded in a review of ~180 vendor/forum field reports on SPAN/mirror/TAP behaviour and confirmed against the local corpus.
+
+- **(A) Capture-source fingerprint** — an informational `Capture source` line infers where the file came from (tunnel mirror ERSPAN/GRE/VXLAN · host capture tcpdump/Wireshark, via NIC offload or the 262144 default snaplen · local SPAN / unknown). Metadata inference, explicitly *not* a device verdict. (Corpus: host vs mirror captures separate cleanly — host = offload + no truncation, mirror = truncation + more drops.)
+- **(B) Mirror sees only ARP/broadcast** — a notice when <2 % of frames are unicast and >90 % are ARP/broadcast/multicast: a virtual bridge (Proxmox/ESXi/Hyper-V) is eating the mirror frames, offload is bypassing the sniffer, or the mirror source is wrong. The #1 recurring forum symptom.
+- **(C) TTL-tolerant double-capture** — the SPAN double-capture detector now hashes the inner L3 with the router-rewritten fields (IPv4 ToS/TTL/checksum, IPv6 hop limit) masked, so a **routed** both-direction mirror — whose copies differ only in TTL — is caught, not just switched (byte-identical) mirrors. `ERSPAN-BOTH` went 42 % → 43 %.
+- **(D) Timestamp-integrity** — a notice for a >1-day inter-frame jump (merged/replayed capture, timing unreliable) and a separate one for astronomical jumps (broken capture clock, e.g. a hardware-timestamping TAP whose dissector plugin is missing → "billions of seconds").
+
+Tests: 17 → 19. Sources: packet-foo, Security Onion, Wireshark/Zeek wikis, Great Scott Gadgets, Profitap, vendor communities.
+
 ## v1.2.0 "Foxhound" — 2026-08-27
 
 **More capture-drop evidence, encapsulation RFC conformance, sourced findings, trust note.**
@@ -29,7 +40,7 @@ Sourcing & trust (per user request):
 - `docs/CHECKS.md` — per-check explanation of why each check fires, with sources.
 
 Scope boundary reaffirmed: per-application RFC-violation / anomaly detection and
-network-fault verdicts remain out of scope → apex.ai.
+network-fault verdicts remain out of scope (network-side analysis, not capture usability).
 
 Tests: 15 → 17 (ACKed-unseen, inner-length truncation).
 
@@ -57,7 +68,7 @@ Large files:
 
 Scope boundary reaffirmed: sequence *gaps* (a capture-usability fact) stay here;
 **network-fault verdicts** (retransmission storms, routing loops, DNS/RST-storms,
-duplicate-IP) are explicitly **out of scope → apex.ai**. Validated against a
+duplicate-IP) are explicitly **out of scope** (network-side analysis). Validated against a
 deduplicated local corpus (669 unique captures) and cross-checked with `tshark`
 (e.g. `openplc_vxlan`: 5174 picocap gaps vs 5469 tshark `lost_segment`).
 

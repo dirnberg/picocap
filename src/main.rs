@@ -15,7 +15,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
-const CODENAME: &str = "Foxhound";
+const CODENAME: &str = "Wolfhound";
 
 /// All tunable parameters — overridable via a YAML config file.
 struct Config {
@@ -158,7 +158,10 @@ struct Stats {
     ips: HashSet<u128>,
     ts_first: Option<f64>,
     ts_last: Option<f64>,
-    // duplicate-frame (SPAN double-capture) detection
+    ts_prev: Option<f64>, // last frame's timestamp (for the biggest inter-frame gap)
+    ts_maxgap: f64,       // largest forward jump between consecutive frames (merge/replay)
+    // duplicate-frame (SPAN double-capture) detection — TTL/ToS/checksum-tolerant,
+    // so a routed both-direction mirror (copies differ only in TTL) is caught too.
     seen: HashMap<u64, f64>,
     dup_frames: u64,
     // VLAN + nested encapsulation
@@ -321,6 +324,25 @@ fn fnv1a(b: &[u8]) -> u64 {
     let mut h = 0xcbf29ce484222325u64;
     for &x in b {
         h ^= x as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+/// FNV-1a over an IP slice with the fields that a router rewrites zeroed out —
+/// IPv4 ToS/DSCP (byte 1), TTL (8) and header checksum (10-11); IPv6 hop limit
+/// (7). The IP Identification and payload stay in the hash, so a mirror copy of
+/// the SAME packet (same ID, different TTL — ingress vs egress of a routed
+/// both-direction SPAN) matches, while a real retransmission (new ID) does not.
+fn fnv1a_masked(ip: &[u8], is_v6: bool) -> u64 {
+    let mut h = 0xcbf29ce484222325u64;
+    for (i, &x) in ip.iter().enumerate() {
+        let masked = if is_v6 {
+            i == 7
+        } else {
+            matches!(i, 1 | 8 | 10 | 11)
+        };
+        h ^= if masked { 0 } else { x as u64 };
         h = h.wrapping_mul(0x100000001b3);
     }
     h
@@ -572,7 +594,7 @@ fn analyze_packet(f: &[u8], link: i32, ts: Option<f64>, s: &mut Stats) {
                     }
                 }
                 collect_ipv4(ip, s);
-                dedup(ip, ts, s);
+                dedup(ip, false, ts, s);
             }
         }
         0x86dd => {
@@ -586,7 +608,7 @@ fn analyze_packet(f: &[u8], link: i32, ts: Option<f64>, s: &mut Stats) {
                     }
                 }
                 collect_ipv6(ip, s);
-                dedup(ip, ts, s);
+                dedup(ip, true, ts, s);
             }
         }
         _ => {
@@ -637,7 +659,7 @@ fn flow_hash(lo: (u128, u16), hi: (u128, u16)) -> u64 {
 /// TCP session integrity: handshake coverage + capture-drop (sequence-gap)
 /// detection. This is a *capture-usability* signal — it answers "did the file
 /// miss segments the endpoints exchanged?", NOT "is the network faulty" (that
-/// is apex.ai's job). Sequence math uses on-wire lengths (IP total length), so
+/// is a network-analysis job). Sequence math uses on-wire lengths (IP total length), so
 /// it is robust to snaplen truncation. `ip` is the IP header onward.
 fn tcp_session(ip: &[u8], is_v6: bool, s: &mut Stats) {
     // Locate L4, on-wire total length, and addresses.
@@ -754,12 +776,12 @@ fn finalize_flows(s: &mut Stats) {
 /// SPAN double-capture detector: a frame whose inner L3 bytes (addresses, IP
 /// id, flags, length, payload) recur within 5 ms is a mirror duplicate, not a
 /// real retransmission (which would arrive ≥ one RTO later).
-fn dedup(ipslice: &[u8], ts: Option<f64>, s: &mut Stats) {
+fn dedup(ipslice: &[u8], is_v6: bool, ts: Option<f64>, s: &mut Stats) {
     let ts = match ts {
         Some(t) => t,
         None => return,
     };
-    let key = fnv1a(ipslice);
+    let key = fnv1a_masked(ipslice, is_v6);
     if let Some(&prev) = s.seen.get(&key) {
         let dt = ts - prev;
         if (0.0..=cfg().dup_window).contains(&dt) {
@@ -1016,6 +1038,45 @@ fn build_notices(r: &mut Report) {
                 ),
             });
         }
+
+        // (B) Mirror sees only ARP/broadcast — almost no unicast reaches the sniffer.
+        let noise = r.stats.arp + r.stats.broadcast + r.stats.multicast;
+        if r.stats.decoded >= 200 {
+            let uni_pct = r.stats.unicast as f64 * 100.0 / r.stats.decoded as f64;
+            let noise_pct = noise as f64 * 100.0 / r.stats.decoded as f64;
+            if uni_pct < 2.0 && noise_pct > 90.0 {
+                r.notices.push(Notice {
+                    code: "mirror_no_unicast",
+                    title: "Almost no unicast — mirror likely not seeing switched traffic".into(),
+                    text: format!(
+                        "Only {:.0}% of frames are unicast; {:.0}% are ARP/broadcast/multicast. The sniffer is seeing discovery noise but not the switched unicast conversations — a virtual bridge (Proxmox/ESXi/Hyper-V) is eating the mirror frames, hardware offload is bypassing the sniffer, or the mirror source is wrong. Verify with a bare laptop + Wireshark before trusting the sensor. [Source: packet-foo.com; Security Onion; forum consensus]",
+                        uni_pct, noise_pct
+                    ),
+                });
+            }
+        }
+    }
+
+    // (D) Timestamp discontinuity — a big forward jump means merged/replayed
+    // captures (timing unreliable) or, if astronomical, a broken capture clock.
+    if r.stats.ts_maxgap > 315_360_000.0 {
+        r.notices.push(Notice {
+            code: "timestamps_implausible",
+            title: "Implausible timestamps (broken capture clock)".into(),
+            text: format!(
+                "Consecutive frames jump by {:.0} years — the capture clock is wrong (e.g. a hardware-timestamping TAP whose dissector plugin is missing, so timestamps read as billions of seconds). Timing analysis is meaningless until the source is fixed. [Source: packet-foo Frame Timestamps; Profitap ProfiShark KB]",
+                r.stats.ts_maxgap / 31_536_000.0
+            ),
+        });
+    } else if r.stats.ts_maxgap > 86_400.0 {
+        r.notices.push(Notice {
+            code: "timestamps_discontinuous",
+            title: "Timestamp discontinuity (merged/replayed capture)".into(),
+            text: format!(
+                "A {:.0}-day gap splits this capture — it is almost certainly a merge/replay of separate recordings, not one continuous capture. Timing rules and any temporal baseline are unreliable; analyse the segments separately. [Source: packet-foo Multi-Point Capture; mergecap(1)]",
+                r.stats.ts_maxgap / 86_400.0
+            ),
+        });
     }
     // a quality notice downgrades a clean ACCEPT to REVIEW
     if !r.notices.is_empty() && r.intake == "ACCEPT" {
@@ -1079,6 +1140,15 @@ fn note_ts(s: &mut Stats, ts: f64) {
     if ts <= 0.0 {
         return;
     }
+    // Largest forward jump between consecutive frames — a day-plus gap means the
+    // file is a merge/replay of separate captures, not one continuous recording.
+    if let Some(prev) = s.ts_prev {
+        let gap = ts - prev;
+        if gap > s.ts_maxgap {
+            s.ts_maxgap = gap;
+        }
+    }
+    s.ts_prev = Some(ts);
     s.ts_first = Some(s.ts_first.map_or(ts, |v| v.min(ts)));
     s.ts_last = Some(s.ts_last.map_or(ts, |v| v.max(ts)));
 }
@@ -1257,7 +1327,7 @@ fn build_checks(r: &mut Report) {
 
     // 7) Capture completeness (TCP): sequence gaps = segments the endpoints
     //    exchanged but the file is missing (SPAN/collector drop). Usability, not
-    //    a network-fault verdict — network-side loss analysis lives in apex.ai.
+    //    a network-fault verdict — network-side loss analysis lives elsewhere.
     if known && r.stats.tcp_flows > 0 {
         let drops = r.stats.seq_gaps + r.stats.acked_unseen;
         let (lvl, det) = if drops == 0 {
@@ -1291,6 +1361,41 @@ fn build_checks(r: &mut Report) {
                 "{} complete handshake, {} SYN-only (one-directional capture?), {} mid-stream (capture started late)",
                 r.stats.hs_complete, r.stats.hs_syn_only, r.stats.hs_midstream
             ),
+        });
+    }
+
+    // (A) Capture-source fingerprint from the metadata (informational, not scored):
+    // where the file most likely came from — a tunnel mirror, an endpoint host
+    // capture, or a plain local SPAN. It is an inference from format/snaplen/
+    // encapsulation/offload, not a proof of the exact device.
+    if known {
+        let s = &r.stats;
+        let offload = r.packets > 0 && s.oversize as f64 / r.packets as f64 >= 0.01;
+        let (src, why) = if s.erspan > 0 || s.gre > 0 || s.vxlan > 0 {
+            (
+                "tunnel mirror (ERSPAN/GRE/VXLAN)",
+                "encapsulated remote SPAN — expect MTU truncation and drops",
+            )
+        } else if offload {
+            (
+                "host capture (endpoint tcpdump/Wireshark)",
+                "NIC offload super-frames present — captured on an endpoint, not a TAP",
+            )
+        } else if r.snaplen == 262144 {
+            (
+                "host capture (tcpdump/dumpcap default)",
+                "snaplen 262144 is the tcpdump/dumpcap -s0 default",
+            )
+        } else {
+            (
+                "local SPAN / unknown",
+                "no tunnel and no host-capture signature",
+            )
+        };
+        c.push(Check {
+            level: "info",
+            label: "Capture source".into(),
+            detail: format!("{src} — {why} (fingerprint from metadata, not a device verdict)"),
         });
     }
 
@@ -2287,6 +2392,36 @@ mod tests {
         assert_eq!(
             r.stats.inner_trunc, 1,
             "inner IP length exceeds captured bytes"
+        );
+    }
+
+    #[test]
+    fn routed_double_capture_ttl_tolerant() {
+        // Two mirror copies of the SAME packet (same IP id) differing only in TTL
+        // — a routed both-direction SPAN. The TTL-tolerant dedup must catch it.
+        let seg = tcp_seg(1000, 80, 5, 0, 0x10, &[1, 2, 3, 4]);
+        let ip1 = ipv4_full([10, 0, 0, 1], [10, 0, 0, 2], 6, &seg);
+        let mut ip2 = ip1.clone();
+        ip2[8] = 0x3f; // decremented TTL (egress copy of the same frame)
+        let f1 = eth(M2, M1, 0x0800, &ip1);
+        let f2 = eth(M2, M1, 0x0800, &ip2);
+        let r = analyze(&pcap(&[(1u32, 0u32, f1), (1, 10, f2)])); // 10 µs apart
+        assert_eq!(
+            r.stats.dup_frames, 1,
+            "routed mirror copy (TTL differs) detected"
+        );
+    }
+
+    #[test]
+    fn timestamp_discontinuity_flagged() {
+        // Two frames > 2 days apart = a merged/replayed capture.
+        let f = |id| eth(M2, M1, 0x0800, &ipv4(6, id, &tcp(0)));
+        let r = analyze(&pcap(&[(1000u32, 0u32, f(1)), (201000u32, 0u32, f(2))]));
+        assert!(
+            r.notices
+                .iter()
+                .any(|n| n.code == "timestamps_discontinuous"),
+            "a multi-day inter-frame gap must raise a discontinuity notice"
         );
     }
 

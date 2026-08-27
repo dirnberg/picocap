@@ -3,7 +3,7 @@
 **The tiny PCAP / PCAPNG capture intake checker.**
 
 [![CI](https://github.com/dirnberg/picocap/actions/workflows/ci.yml/badge.svg)](https://github.com/dirnberg/picocap/actions/workflows/ci.yml)
-![version](https://img.shields.io/badge/version-1.2.0%20%22Foxhound%22-19e0d8)
+![version](https://img.shields.io/badge/version-1.3.0%20%22Wolfhound%22-19e0d8)
 ![license](https://img.shields.io/badge/license-MIT-blue)
 ![built with](https://img.shields.io/badge/built%20with-Rust-orange)
 
@@ -74,7 +74,7 @@ picocap capture.pcap              # text summary + verdict (exit 0/1/2)
 picocap --report capture.pcap     # full Markdown assessment report → stdout
 picocap --report big.pcapng > big-assessment.md
 picocap serve                     # start the web GUI (see below)
-picocap --version                 # picocap 1.2.0 "Foxhound"
+picocap --version                 # picocap 1.3.0 "Wolfhound"
 ```
 
 `--report` has no size limit, so it also handles multi-GB captures the GUI upload
@@ -105,10 +105,10 @@ docker compose up -d
 # or plain docker, hardened, localhost-only, with a token
 docker run --rm -p 127.0.0.1:8088:8088 -e PICOCAP_TOKEN=<token> \
   --read-only --cap-drop ALL --security-opt no-new-privileges --tmpfs /tmp \
-  picocap:1.2.0
+  picocap:1.3.0
 
 # CLI inside the container (read-only mount)
-docker run --rm -v "$PWD:/d:ro" picocap:1.2.0 /d/capture.pcap
+docker run --rm -v "$PWD:/d:ro" picocap:1.3.0 /d/capture.pcap
 ```
 
 ## Configuration — `picocap.yml`
@@ -166,6 +166,17 @@ hand.
 ## Releases
 
 Full notes: [GitHub Releases](https://github.com/dirnberg/picocap/releases). Change log: [`EVOLUTION.md`](EVOLUTION.md).
+
+### v1.3.0 — "Wolfhound" (2026-08-27)
+Grounded in a review of ~180 vendor/forum field reports on SPAN/mirror/TAP
+behaviour. Adds a **capture-source fingerprint** (tunnel mirror · host tcpdump/
+Wireshark · local SPAN — inferred from format/snaplen/encapsulation/offload, not a
+device verdict), a **"mirror sees only ARP/broadcast"** notice (a virtual bridge
+eating the mirror frames, or offload bypassing the sniffer — the #1 forum symptom),
+**timestamp-integrity** checks (multi-day gap = merged/replayed capture; astronomical
+gap = broken capture clock), and makes **SPAN double-capture TTL-tolerant** so a
+*routed* both-direction mirror (copies differ only in TTL) is caught, not just a
+switched byte-identical one.
 
 ### v1.2.0 — "Foxhound" (2026-08-27)
 Adds **capture completeness at the TCP-session level** — handshake coverage
