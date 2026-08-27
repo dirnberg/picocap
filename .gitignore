@@ -2,8 +2,10 @@
 # real config holds the secret token — keep it out of git
 picocap.yml
 .env
-# local scan artifacts
+# local scan artifacts (but keep the committed demo fixtures)
 *.pcap
 *.pcapng
+!samples/*.pcap
+!samples/*.pcapng
 /reports
 .DS_Store
