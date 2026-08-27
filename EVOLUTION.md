@@ -3,6 +3,23 @@
 Every shipped change to what PicoCap detects or how it runs, newest first.
 Each entry is backed by `cargo test` and a semantic version bump in `Cargo.toml`.
 
+## v1.4.0 "Staghound" — 2026-08-27
+
+**Egress-tag artifact on the double-capture finding.** A measure-first feature: a
+corpus probe (181 VLAN captures, 27k bidirectional TCP streams) showed pure
+*directional* tag-asymmetry is 0.1 % of streams (routing noise, not worth a
+check) — but the **egress-copy tag artifact** shows up in ~8 % of VLAN captures,
+always *inside* a double-capture and in large counts. So it is surfaced where it
+belongs: as an annotation on the SPAN double-capture notice, not a separate check.
+
+When the two mirror copies of the same frame differ in VLAN tagging (one tagged,
+one not), the switch applied the tag before the untag step — a chipset artifact on
+HP/Aruba, Cisco SG200, Juniper EX. The double-capture notice now reads e.g. *"21 %
+double-capture … of the duplicate copies, 30 % differ in VLAN tagging — the egress
+copy carries a tag the ingress copy lacks."* Confirmed on real captures.
+
+Tests: 19 → 20.
+
 ## v1.3.0 "Wolfhound" — 2026-08-27
 
 **Capture-source fingerprint, mirror-blindness & timestamp-integrity checks, TTL-tolerant double-capture.** Grounded in a review of ~180 vendor/forum field reports on SPAN/mirror/TAP behaviour and confirmed against the local corpus.

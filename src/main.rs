@@ -15,7 +15,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
-const CODENAME: &str = "Wolfhound";
+const CODENAME: &str = "Staghound";
 
 /// All tunable parameters — overridable via a YAML config file.
 struct Config {
@@ -162,8 +162,9 @@ struct Stats {
     ts_maxgap: f64,       // largest forward jump between consecutive frames (merge/replay)
     // duplicate-frame (SPAN double-capture) detection — TTL/ToS/checksum-tolerant,
     // so a routed both-direction mirror (copies differ only in TTL) is caught too.
-    seen: HashMap<u64, f64>,
+    seen: HashMap<u64, (f64, bool)>, // key -> (timestamp, was VLAN-tagged)
     dup_frames: u64,
+    dup_tag_diff: u64, // duplicate copies that differ in VLAN tagging (egress-tag artifact)
     // VLAN + nested encapsulation
     qinq: u64, // frames with >=2 stacked VLAN tags
     vlan_ids: HashSet<u16>,
@@ -594,7 +595,7 @@ fn analyze_packet(f: &[u8], link: i32, ts: Option<f64>, s: &mut Stats) {
                     }
                 }
                 collect_ipv4(ip, s);
-                dedup(ip, false, ts, s);
+                dedup(ip, false, ts, tags > 0, s);
             }
         }
         0x86dd => {
@@ -608,7 +609,7 @@ fn analyze_packet(f: &[u8], link: i32, ts: Option<f64>, s: &mut Stats) {
                     }
                 }
                 collect_ipv6(ip, s);
-                dedup(ip, true, ts, s);
+                dedup(ip, true, ts, tags > 0, s);
             }
         }
         _ => {
@@ -775,21 +776,26 @@ fn finalize_flows(s: &mut Stats) {
 
 /// SPAN double-capture detector: a frame whose inner L3 bytes (addresses, IP
 /// id, flags, length, payload) recur within 5 ms is a mirror duplicate, not a
-/// real retransmission (which would arrive ≥ one RTO later).
-fn dedup(ipslice: &[u8], is_v6: bool, ts: Option<f64>, s: &mut Stats) {
+/// real retransmission (which would arrive ≥ one RTO later). `tagged` is whether
+/// this copy carried a VLAN tag — if the two mirror copies differ, that is the
+/// egress-tag chipset artifact (the tag is applied before the untag step).
+fn dedup(ipslice: &[u8], is_v6: bool, ts: Option<f64>, tagged: bool, s: &mut Stats) {
     let ts = match ts {
         Some(t) => t,
         None => return,
     };
     let key = fnv1a_masked(ipslice, is_v6);
-    if let Some(&prev) = s.seen.get(&key) {
+    if let Some(&(prev, prev_tagged)) = s.seen.get(&key) {
         let dt = ts - prev;
         if (0.0..=cfg().dup_window).contains(&dt) {
             s.dup_frames += 1;
+            if prev_tagged != tagged {
+                s.dup_tag_diff += 1;
+            }
         }
     }
     if s.seen.len() < 2_000_000 || s.seen.contains_key(&key) {
-        s.seen.insert(key, ts);
+        s.seen.insert(key, (ts, tagged));
     }
 }
 
@@ -979,11 +985,26 @@ fn build_notices(r: &mut Report) {
     if r.packets > 0 {
         let pct = (r.stats.dup_frames as f64 * 100.0 / r.packets as f64).round() as u64;
         if pct >= cfg().dup_notice_pct {
+            // Egress-tag artifact: when the two mirror copies differ in VLAN
+            // tagging (one tagged, one not), the switch applied the tag before
+            // the untag step — a chipset artifact seen on HP/Aruba, Cisco SG200,
+            // Juniper EX. It only shows up *inside* a double-capture, so it is an
+            // annotation on this finding, not a separate one.
+            let tagged_pct = if r.stats.dup_frames > 0 {
+                (r.stats.dup_tag_diff as f64 * 100.0 / r.stats.dup_frames as f64).round() as u64
+            } else {
+                0
+            };
+            let egress = if tagged_pct >= 20 {
+                format!(" Of the duplicate copies, {tagged_pct}% differ in VLAN tagging (one tagged, one not) — the egress copy carries a tag the ingress copy lacks, a chipset egress-tag artifact (HP/Aruba, Cisco SG200, Juniper EX).")
+            } else {
+                String::new()
+            };
             r.notices.push(Notice {
                 code: "span_double_capture",
                 title: "SPAN double-capture (TX + RX)".into(),
                 text: format!(
-                    "{pct}% of frames recur byte-identically (same endpoints, flags, length and payload) within 5 ms — the port-mirror is capturing BOTH TX and RX of the same segment, so each frame appears twice. Wireshark reads the second copy as a TCP retransmission, but these are capture artifacts, not real retransmissions (a real retransmit arrives ≥ one RTO later). Set the SPAN/ERSPAN source to RX-only (or TX-only) to remove them. [Source: Keysight/Gigamon SPAN de-duplication; packet-foo.com; editcap(1) -d]"
+                    "{pct}% of frames recur byte-identically (same endpoints, flags, length and payload) within 5 ms — the port-mirror is capturing BOTH TX and RX of the same segment, so each frame appears twice. Wireshark reads the second copy as a TCP retransmission, but these are capture artifacts, not real retransmissions (a real retransmit arrives ≥ one RTO later). Set the SPAN/ERSPAN source to RX-only (or TX-only) to remove them.{egress} [Source: Keysight/Gigamon SPAN de-duplication; packet-foo.com; editcap(1) -d]"
                 ),
             });
         }
@@ -2410,6 +2431,21 @@ mod tests {
             r.stats.dup_frames, 1,
             "routed mirror copy (TTL differs) detected"
         );
+    }
+
+    #[test]
+    fn egress_tag_artifact_on_double_capture() {
+        // The same inner frame appears twice within the window — once untagged,
+        // once 802.1Q-tagged: the egress-copy VLAN-tag chipset artifact.
+        let inner = ipv4(6, 42, &tcp_seg(1000, 80, 5, 0, 0x10, &[9u8; 20]));
+        let untagged = eth(M2, M1, 0x0800, &inner);
+        let tagged = vlan(M2, 100, 0x0800, &inner); // same inner IP, VLAN-tagged
+        let r = analyze(&pcap(&[(1u32, 0u32, untagged), (1, 1000, tagged)])); // 1 ms apart
+        assert_eq!(
+            r.stats.dup_frames, 1,
+            "the two copies are the same inner frame"
+        );
+        assert_eq!(r.stats.dup_tag_diff, 1, "the copies differ in VLAN tagging");
     }
 
     #[test]

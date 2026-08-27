@@ -7,7 +7,7 @@ VLAN/GRE/ERSPAN/VXLAN breakdown, encapsulation-chain distribution,
 handshake coverage + **capture-drop (sequence-gap)** detection + runt/oversize.
 Multi-GB captures stream from disk (CLI, ~flat memory). Never rewrites or forwards.
 
-- Repo: https://github.com/dirnberg/picocap · release `v1.3.0 "Wolfhound"`
+- Repo: https://github.com/dirnberg/picocap · release `v1.4.0 "Staghound"`
 - Pure Rust: `pcap-parser`, `sha2`, `axum`. No `libpcap`, no system deps.
 - Scope line: capture *usability* only. Network-fault verdicts (retrans storms,
   routing loops, DNS/RST-storms, dup-IP) are out of scope (network-side, not here).

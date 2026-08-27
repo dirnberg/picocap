@@ -79,8 +79,10 @@ fields (IPv4 ToS/TTL/checksum, IPv6 hop limit) are masked — the mirror capture
 both TX and RX, so each frame appears twice (read as spurious retransmissions).
 Masking those fields catches a **routed** both-direction mirror too, whose copies
 differ only in TTL, not just a switched byte-identical one. Mirror RX-only or
-TX-only. **Source** Keysight/Gigamon SPAN de-duplication; packet-foo.com;
-`editcap(1) -d`.
+TX-only. When the two copies differ in VLAN tagging (one tagged, one not) the
+notice adds that the **egress copy is tag-carrying** — a chipset egress-tag
+artifact (HP/Aruba, Cisco SG200, Juniper EX). **Source** Keysight/Gigamon SPAN
+de-duplication; packet-foo.com; `editcap(1) -d`.
 
 ### Capture source (informational)
 A fingerprint of where the file most likely came from — *tunnel mirror*
