@@ -90,10 +90,10 @@ docker compose up -d
 # or plain docker, hardened, localhost-only, with a token
 docker run --rm -p 127.0.0.1:8088:8088 -e PICOCAP_TOKEN=<token> \
   --read-only --cap-drop ALL --security-opt no-new-privileges --tmpfs /tmp \
-  picocap:1.0.0
+  picocap:1.2.0
 
 # CLI inside the container (read-only mount)
-docker run --rm -v "$PWD:/d:ro" picocap:1.0.0 /d/capture.pcap
+docker run --rm -v "$PWD:/d:ro" picocap:1.2.0 /d/capture.pcap
 ```
 
 ## Configuration — `picocap.yml`
