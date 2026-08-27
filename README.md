@@ -8,16 +8,19 @@
 ![built with](https://img.shields.io/badge/built%20with-Rust-orange)
 
 > **What it does:** point PicoCap at a pcap/pcapng and it tells you — in the CLI or
-> a small web GUI — whether the capture is *clean and usable*: it checks the file
-> against the PCAP Collection Guide, scores its conformance, breaks down the packet
-> distribution and encapsulation (VLAN, GRE/ERSPAN/VXLAN), and flags the mistake
-> that quietly ruins OT captures — **SPAN double-capture (TX + RX)**. Read-only: it
-> never rewrites or forwards the file.
+> a small web GUI — whether the capture is *clean and usable as evidence*: it checks
+> the file against the PCAP Collection Guide, scores its conformance, breaks down the
+> packet distribution and encapsulation (VLAN, GRE/ERSPAN/VXLAN), and flags the
+> mistakes that quietly ruin OT captures — **SPAN double-capture (TX + RX)**,
+> **dropped segments** (sequence gaps + ACKed-unseen), and **one-directional
+> captures**. Multi-GB files stream from disk. Every finding cites a source, and
+> nothing leaves the machine. Read-only: it never rewrites or forwards the file.
 
 PicoCap takes **one** capture and answers a single question: *is this capture good
 enough to work with?* It verifies the file against the **PCAP Collection Guide**
 criteria, decodes the packet distribution and encapsulation, and flags mirror
-double-captures. It only ever **reads** a file; it never rewrites or forwards it.
+double-captures, dropped segments and one-directional captures. It only ever
+**reads** a file; it never rewrites or forwards it.
 
 Pure Rust, no `libpcap`, no system dependencies. CLI + a self-contained web GUI.
 
@@ -40,10 +43,22 @@ Pure Rust, no `libpcap`, no system dependencies. CLI + a self-contained web GUI.
   `Eth>GRE/ERSPAN>Eth>VLAN>IPv4>TCP`) with **count / %**
 - **SPAN double-capture (TX + RX)** — frames whose inner L3 content recurs within a
   short window are mirror duplicates, not real retransmissions
+- **TCP session integrity** — handshake coverage per session (complete / **SYN-only**,
+  i.e. one-directional / **mid-stream**, i.e. capture started late)
+- **Capture-drop detection** — **sequence gaps** + **ACKed-unseen** segments = data
+  the endpoints exchanged but the file is missing (RFC 9293 §3.4), cross-checked
+  with `tshark`. This is the core "is the capture complete?" check.
+- **Frame-length anomalies** — runt / oversize / **NIC-offload super-frames** (TSO/GRO)
+- **Encapsulation RFC conformance** — inner-length truncation, **VXLAN on legacy UDP
+  8472** (vs RFC 7348 port 4789), and **malformed VXLAN headers** (RFC 7348 §5 violation)
 - **Capture metadata** — recording start/end (UTC), duration, pcap version, byte
   order, timestamp precision, link type, throughput, avg packet size
 
-Verdict is one of **ACCEPT · REVIEW · REJECT**.
+Verdict is one of **ACCEPT · REVIEW · REJECT**. Every criterion cites an
+authoritative **source** (RFC / Wireshark / Zeek / packet-foo / SANS ISC) — in the
+JSON, the report and the GUI — see [`docs/CHECKS.md`](docs/CHECKS.md). Multi-GB
+captures **stream from disk** (tested to 5.5 GB, ~flat memory). Processing is
+**local only**: no cloud, and every report carries a trust note.
 
 ## Install / build
 
