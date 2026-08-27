@@ -2497,6 +2497,58 @@ mod tests {
         );
     }
 
+    /// Deployment guard: the committed demo capture must keep tripping every
+    /// finding, with the egress-tag annotation, and no notice text may contain a
+    /// replacement char. This is what catches a regressed notice or an encoding
+    /// break in CI — not a manual GUI look.
+    #[test]
+    fn demo_capture_trips_all_findings() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/samples/ot-all-findings-demo.pcap"
+        );
+        let data = std::fs::read(path).expect("demo capture present in samples/");
+        let r = analyze(&data);
+        let codes: Vec<&str> = r.notices.iter().map(|n| n.code).collect();
+        for expect in [
+            "span_double_capture",
+            "offload_superframes",
+            "vxlan_legacy_port",
+            "vxlan_rfc7348_iflag",
+            "inner_truncation",
+            "timestamps_discontinuous",
+        ] {
+            assert!(
+                codes.contains(&expect),
+                "demo must trip {expect} (got {codes:?})"
+            );
+        }
+        assert!(
+            r.checks
+                .iter()
+                .any(|c| c.label.starts_with("No capture drops") && c.level == "warn"),
+            "demo must show a capture-drop warning"
+        );
+        let sd = r
+            .notices
+            .iter()
+            .find(|n| n.code == "span_double_capture")
+            .unwrap();
+        assert!(
+            sd.text.contains("VLAN tagging"),
+            "egress-tag annotation missing"
+        );
+        // Every notice text is valid UTF-8 (String guarantees it); the U+FFFD
+        // replacement char would signal a decoding break upstream.
+        for n in &r.notices {
+            assert!(
+                !n.text.contains('\u{FFFD}'),
+                "notice {} contains a replacement char",
+                n.code
+            );
+        }
+    }
+
     #[test]
     fn tcp_clean_session_no_gap() {
         // A clean, in-order half-session: SYN then contiguous data, no gaps.
