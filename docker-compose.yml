@@ -1,7 +1,7 @@
 services:
   picocap:
     build: .
-    image: picocap:1.0.0
+    image: picocap:latest
     command: ["serve", "0.0.0.0:8088"]
     # Host exposure limited to localhost; use an SSH tunnel / TLS proxy for remote.
     ports:
