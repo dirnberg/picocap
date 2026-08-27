@@ -3,7 +3,7 @@
 **The tiny PCAP / PCAPNG capture intake checker.**
 
 [![CI](https://github.com/dirnberg/picocap/actions/workflows/ci.yml/badge.svg)](https://github.com/dirnberg/picocap/actions/workflows/ci.yml)
-![version](https://img.shields.io/badge/version-1.0.0%20%22Groundhog%22-19e0d8)
+![version](https://img.shields.io/badge/version-1.2.0%20%22Foxhound%22-19e0d8)
 ![license](https://img.shields.io/badge/license-MIT-blue)
 ![built with](https://img.shields.io/badge/built%20with-Rust-orange)
 
@@ -59,7 +59,7 @@ picocap capture.pcap              # text summary + verdict (exit 0/1/2)
 picocap --report capture.pcap     # full Markdown assessment report → stdout
 picocap --report big.pcapng > big-assessment.md
 picocap serve                     # start the web GUI (see below)
-picocap --version                 # picocap 1.0.0 "Groundhog"
+picocap --version                 # picocap 1.2.0 "Foxhound"
 ```
 
 `--report` has no size limit, so it also handles multi-GB captures the GUI upload
@@ -149,6 +149,22 @@ This exercises the tunnel/VLAN paths for which real-world captures may not be at
 hand.
 
 ## Releases
+
+Full notes: [GitHub Releases](https://github.com/dirnberg/picocap/releases). Change log: [`EVOLUTION.md`](EVOLUTION.md).
+
+### v1.2.0 — "Foxhound" (2026-08-27)
+Adds **capture completeness at the TCP-session level** — handshake coverage
+(complete / SYN-only / mid-stream) and **capture-drop detection** (sequence gaps
++ **ACKed-unseen** segments, RFC 9293 §3.4, cross-checked with `tshark`). Plus
+encapsulation/RFC conformance (inner-length truncation, NIC-offload super-frames,
+VXLAN on legacy 8472, and **malformed VXLAN headers = RFC 7348 §5 violation**).
+Multi-GB captures now **stream from disk** (tested to 5.5 GB, ~flat memory). Every
+finding cites a **source** (RFC / Wireshark / Zeek / packet-foo …), and every
+report carries a trust note: processed locally, no cloud, calibrated against a
+golden set cross-checked with `tshark` (see [`docs/CHECKS.md`](docs/CHECKS.md)).
+The codename nods to the namesake check: a foxhound follows a scent trail without
+losing it — like tracking each TCP session's sequence trail to see where the
+capture dropped it.
 
 ### v1.0.0 — "Groundhog" (2026-08-25)
 First full release. See the feature list above. The codename nods to the namesake
