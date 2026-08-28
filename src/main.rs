@@ -15,7 +15,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
-const CODENAME: &str = "Staghound";
+const CODENAME: &str = "Bloodhound";
 
 /// All tunable parameters — overridable via a YAML config file.
 struct Config {
@@ -141,6 +141,10 @@ struct Check {
 /// Stats gathered while walking the packets.
 #[derive(Default)]
 struct Stats {
+    cur_frame: u64, // 1-based index of the frame currently being analysed
+    // Per-finding evidence: finding code -> first few frame numbers where it was
+    // observed in THIS capture (capped). Turns a count into "show me the line".
+    evidence: HashMap<&'static str, Vec<u64>>,
     decoded: u64, // frames we could decode at L2
     unicast: u64,
     multicast: u64,
@@ -184,6 +188,7 @@ struct Stats {
     inner_trunc: u64,               // inner IP total-length > captured bytes = truncated segment
     vxlan_legacy: u64,              // VXLAN on legacy UDP 8472 instead of RFC 7348 port 4789
     vxlan_bad: u64,                 // VXLAN header with 'I' flag clear = RFC 7348 §5 violation
+    loopback_frames: u64,           // 127.0.0.0/8 or ::1 seen on the wire = host-local capture
 }
 
 /// Minimal per-flow TCP state for handshake coverage + capture-drop detection.
@@ -200,7 +205,10 @@ struct FlowState {
 struct Notice {
     code: &'static str,
     title: String,
-    text: String,
+    text: String,                               // one-line summary (CLI + list views)
+    explain: String,  // plain-language, detailed "what / where / why / fix"
+    frames: Vec<u64>, // real frame numbers in THIS capture where it was seen
+    sources: Vec<(&'static str, &'static str)>, // (authority, exact citation) — verifiable
 }
 
 /// Full result of checking one capture.
@@ -483,12 +491,14 @@ fn decap_once<'a>(f: &'a [u8], link: i32, s: &mut Stats) -> (&'a [u8], i32, Opti
                     s.vxlan += 1;
                     if p == 8472 {
                         s.vxlan_legacy += 1;
+                        note_ev(s, "vxlan_legacy_port");
                     }
                     // RFC 7348 §5: the VXLAN header 'I' flag (0x08) MUST be 1 for a
                     // valid VNI. If it is clear, the encapsulation is malformed.
                     if let Some(vh) = f.get(iphdr + 8..iphdr + 16) {
                         if vh[0] & 0x08 == 0 {
                             s.vxlan_bad += 1;
+                            note_ev(s, "vxlan_rfc7348_iflag");
                         }
                     }
                     (f.get(iphdr + 8 + 8..).unwrap_or(&[]), 1, Some("VXLAN")) // UDP+VXLAN → inner eth
@@ -635,6 +645,14 @@ fn collect_ipv4(d: &[u8], s: &mut Stats) {
         s.ips
             .insert(u32::from_be_bytes([d[16], d[17], d[18], d[19]]) as u128);
     }
+    // Loopback on the wire: 127.0.0.0/8 as source or destination. Per RFC 1122
+    // §3.2.1.3 these MUST NOT appear outside a host, so a captured frame carrying
+    // one means the capture came from a host's loopback (or an appliance's
+    // internal interface), not from a TAP/SPAN of the network.
+    if d.len() >= 20 && (d[12] == 127 || d[16] == 127) {
+        s.loopback_frames += 1;
+        note_ev(s, "loopback_on_wire");
+    }
 }
 
 fn collect_ipv6(d: &[u8], s: &mut Stats) {
@@ -644,6 +662,15 @@ fn collect_ipv6(d: &[u8], s: &mut Stats) {
         s.ips.insert(u128::from_be_bytes(a));
         a.copy_from_slice(&d[24..40]);
         s.ips.insert(u128::from_be_bytes(a));
+    }
+    // IPv6 loopback ::1 (15 zero bytes then 0x01) as source or destination — the
+    // RFC 4291 §2.5.3 equivalent of 127/8, equally impossible on a real link.
+    if d.len() >= 40 {
+        let is_loop = |o: usize| d[o..o + 15].iter().all(|&b| b == 0) && d[o + 15] == 1;
+        if is_loop(8) || is_loop(24) {
+            s.loopback_frames += 1;
+            note_ev(s, "loopback_on_wire");
+        }
     }
 }
 
@@ -704,6 +731,7 @@ fn tcp_session(ip: &[u8], is_v6: bool, s: &mut Stats) {
     // captured — a tunnel/MTU or snaplen cut that loses payload for reassembly.
     if total_len > ip.len() {
         s.inner_trunc += 1;
+        note_ev(s, "inner_truncation");
     }
     // SYN and FIN each consume one sequence number.
     let seg = payload + syn as usize + fin as usize;
@@ -720,6 +748,7 @@ fn tcp_session(ip: &[u8], is_v6: bool, s: &mut Stats) {
     if !s.flows.contains_key(&key) && s.flows.len() >= 200_000 {
         return; // bound memory
     }
+    let mut drop_here = false;
     let f = s.flows.entry(key).or_default();
 
     if syn && !ack {
@@ -739,6 +768,7 @@ fn tcp_session(ip: &[u8], is_v6: bool, s: &mut Stats) {
         let gap = seq.wrapping_sub(exp);
         if gap > 0 && gap < 16_000_000 {
             s.seq_gaps += 1;
+            drop_here = true;
         }
     }
     // ACKed-unseen = capture drop: this segment acknowledges peer data whose
@@ -750,6 +780,7 @@ fn tcp_session(ip: &[u8], is_v6: bool, s: &mut Stats) {
             let ahead = ackn.wrapping_sub(peer_end);
             if ahead > 0 && ahead < 16_000_000 {
                 s.acked_unseen += 1;
+                drop_here = true;
             }
         }
     }
@@ -757,6 +788,11 @@ fn tcp_session(ip: &[u8], is_v6: bool, s: &mut Stats) {
     match f.next_seq[dir] {
         Some(cur) if end.wrapping_sub(cur) >= 0x8000_0000 => {} // don't move expected backward
         _ => f.next_seq[dir] = Some(end),
+    }
+    // `f` (the flow borrow) is no longer used past here, so recording evidence
+    // (which needs &mut Stats as a whole) is safe.
+    if drop_here {
+        note_ev(s, "capture_drop");
     }
 }
 
@@ -789,6 +825,7 @@ fn dedup(ipslice: &[u8], is_v6: bool, ts: Option<f64>, tagged: bool, s: &mut Sta
         let dt = ts - prev;
         if (0.0..=cfg().dup_window).contains(&dt) {
             s.dup_frames += 1;
+            note_ev(s, "span_double_capture");
             if prev_tagged != tagged {
                 s.dup_tag_diff += 1;
             }
@@ -879,6 +916,7 @@ fn analyze_core<R: std::io::Read>(magic: &[u8], src: R, total: usize) -> Report 
                     }
                     PcapBlockOwned::Legacy(b) => {
                         r.packets += 1;
+                        r.stats.cur_frame = r.packets as u64;
                         r.wire_bytes += b.origlen as u64;
                         note_framelen(&mut r.stats, b.origlen);
                         if b.origlen > b.caplen {
@@ -904,6 +942,7 @@ fn analyze_core<R: std::io::Read>(magic: &[u8], src: R, total: usize) -> Report 
                     }
                     PcapBlockOwned::NG(Block::EnhancedPacket(ep)) => {
                         r.packets += 1;
+                        r.stats.cur_frame = r.packets as u64;
                         r.wire_bytes += ep.origlen as u64;
                         note_framelen(&mut r.stats, ep.origlen);
                         if ep.origlen > ep.caplen {
@@ -916,6 +955,7 @@ fn analyze_core<R: std::io::Read>(magic: &[u8], src: R, total: usize) -> Report 
                     }
                     PcapBlockOwned::NG(Block::SimplePacket(sp)) => {
                         r.packets += 1;
+                        r.stats.cur_frame = r.packets as u64;
                         r.wire_bytes += sp.origlen as u64;
                         note_framelen(&mut r.stats, sp.origlen);
                         let lk = interfaces.first().copied().unwrap_or(1);
@@ -1000,64 +1040,84 @@ fn build_notices(r: &mut Report) {
             } else {
                 String::new()
             };
-            r.notices.push(Notice {
-                code: "span_double_capture",
-                title: "SPAN double-capture (TX + RX)".into(),
-                text: format!(
-                    "{pct}% of frames recur byte-identically (same endpoints, flags, length and payload) within 5 ms — the port-mirror is capturing BOTH TX and RX of the same segment, so each frame appears twice. Wireshark reads the second copy as a TCP retransmission, but these are capture artifacts, not real retransmissions (a real retransmit arrives ≥ one RTO later). Set the SPAN/ERSPAN source to RX-only (or TX-only) to remove them.{egress} [Source: Keysight/Gigamon SPAN de-duplication; packet-foo.com; editcap(1) -d]"
+            r.notices.push(Notice::new(
+                "span_double_capture",
+                "SPAN double-capture (TX + RX)",
+                format!(
+                    "{pct}% of frames recur byte-identically (same endpoints, flags, length and payload) within 5 ms — the port-mirror is capturing BOTH TX and RX of the same segment, so each frame appears twice. Wireshark reads the second copy as a TCP retransmission, but these are capture artifacts, not real retransmissions (a real retransmit arrives ≥ one RTO later). Set the SPAN/ERSPAN source to RX-only (or TX-only) to remove them.{egress}"
                 ),
-            });
+                &r.stats,
+            ));
         }
 
         // Offload super-frames (TSO/GRO): frames far above the 1518 B Ethernet MTU
         // never existed on the wire — the capture host reassembled them.
         let ov_pct = (r.stats.oversize as f64 * 100.0 / r.packets as f64).round() as u64;
         if r.stats.oversize > 0 && ov_pct >= 1 {
-            r.notices.push(Notice {
-                code: "offload_superframes",
-                title: "NIC offload artifacts (TSO/GRO)".into(),
-                text: format!(
-                    "{}% of frames exceed the 1518 B Ethernet MTU — captured on an endpoint where TSO/GSO/GRO/LRO hand libpcap 2.9–64 KB pseudo-frames that were never on the wire. This breaks target-based IDS reassembly (insertion/evasion). Disable offload on the capture NIC (ethtool -K if gso off gro off tso off lro off) or capture at a TAP. [Source: Wireshark 'Offloading' wiki; Suricata Packet Capture docs]",
+            r.notices.push(Notice::new(
+                "offload_superframes",
+                "NIC offload artifacts (TSO/GRO)",
+                format!(
+                    "{}% of frames exceed the 1518 B Ethernet MTU — captured on an endpoint where TSO/GSO/GRO/LRO hand libpcap 2.9–64 KB pseudo-frames that were never on the wire. This breaks target-based IDS reassembly (insertion/evasion). Disable offload on the capture NIC (ethtool -K if gso off gro off tso off lro off) or capture at a TAP.",
                     ov_pct
                 ),
-            });
+                &r.stats,
+            ));
         }
 
         // VXLAN on the legacy Linux port 8472 instead of the RFC 7348 port 4789.
         if r.stats.vxlan_legacy > 0 {
-            r.notices.push(Notice {
-                code: "vxlan_legacy_port",
-                title: "VXLAN on legacy UDP 8472".into(),
-                text: format!(
-                    "{} VXLAN frames use UDP port 8472 (Linux/flannel/old-OVS legacy) instead of the IANA/RFC 7348 port 4789. Sensors that only decode 4789 (Wireshark, Suricata, Zeek defaults) would see one giant UDP flow and miss every inner host. Add 8472 to the decoder's VXLAN ports. [Source: RFC 7348 §5; Suricata decoder.vxlan; Zeek vxlan_ports]",
+            r.notices.push(Notice::new(
+                "vxlan_legacy_port",
+                "VXLAN on legacy UDP 8472",
+                format!(
+                    "{} VXLAN frames use UDP port 8472 (Linux/flannel/old-OVS legacy) instead of the IANA/RFC 7348 port 4789. Sensors that only decode 4789 (Wireshark, Suricata, Zeek defaults) would see one giant UDP flow and miss every inner host. Add 8472 to the decoder's VXLAN ports.",
                     grp(r.stats.vxlan_legacy)
                 ),
-            });
+                &r.stats,
+            ));
         }
 
         // RFC 7348 §5 violation: VXLAN header with the 'I' flag clear (invalid VNI).
         if r.stats.vxlan_bad > 0 {
-            r.notices.push(Notice {
-                code: "vxlan_rfc7348_iflag",
-                title: "Malformed VXLAN header (RFC 7348 violation)".into(),
-                text: format!(
-                    "{} VXLAN frames carry a header whose 'I' flag is not set — RFC 7348 §5 requires it to be 1 for the VNI to be valid. Strict decoders may reject these frames, hiding the inner hosts. [Source: RFC 7348 §5]",
+            r.notices.push(Notice::new(
+                "vxlan_rfc7348_iflag",
+                "Malformed VXLAN header (RFC 7348 violation)",
+                format!(
+                    "{} VXLAN frames carry a header whose 'I' flag is not set — RFC 7348 §5 requires it to be 1 for the VNI to be valid. Strict decoders may reject these frames, hiding the inner hosts.",
                     grp(r.stats.vxlan_bad)
                 ),
-            });
+                &r.stats,
+            ));
         }
 
         // Inner-length truncation: IP total-length exceeds the captured bytes.
         let it_pct = (r.stats.inner_trunc as f64 * 100.0 / r.packets as f64).round() as u64;
         if r.stats.inner_trunc > 0 && it_pct >= 1 {
-            r.notices.push(Notice {
-                code: "inner_truncation",
-                title: "Truncated segments (inner IP length > captured)".into(),
-                text: format!(
-                    "{}% of TCP packets carry an IP total-length larger than the bytes actually captured — snaplen or a tunnel/mirror MTU cut the payload. Reassembly, file extraction and IDS content matching run on incomplete data. Capture with -s 0 and raise the mirror-path MTU above the encapsulation overhead (VXLAN +50 B, ERSPAN +50–62 B). [Source: RFC 7348 / ERSPAN draft-foschiano-erspan; tcpdump(1) snaplen; SANS ISC]",
+            r.notices.push(Notice::new(
+                "inner_truncation",
+                "Truncated segments (inner IP length > captured)",
+                format!(
+                    "{}% of TCP packets carry an IP total-length larger than the bytes actually captured — snaplen or a tunnel/mirror MTU cut the payload. Reassembly, file extraction and IDS content matching run on incomplete data. Capture with -s 0 and raise the mirror-path MTU above the encapsulation overhead (VXLAN +50 B, ERSPAN +50–62 B).",
                     it_pct
                 ),
-            });
+                &r.stats,
+            ));
+        }
+
+        // Loopback on the wire = host-local capture (or appliance internal
+        // interface). A hard RFC 1122 invariant: 127/8 and ::1 can NEVER cross a
+        // link, so even one frame is a definitive capture-provenance signal.
+        if r.stats.loopback_frames > 0 {
+            r.notices.push(Notice::new(
+                "loopback_on_wire",
+                "Loopback address on the wire (host-local capture)",
+                format!(
+                    "{} frame(s) carry a loopback address (127.0.0.0/8 or ::1) as source or destination. Loopback traffic can never cross a network link (RFC 1122 §3.2.1.3), so this file was recorded on a host's loopback interface — or exported from an appliance (e.g. a Barracuda CloudGen/NG firewall) that captured its own internal interface — not from a TAP/SPAN of the network segment. The 127.x/::1 conversations are host-internal and are not representative of on-wire traffic; treat any asset inventory or baseline built from them with care.",
+                    grp(r.stats.loopback_frames)
+                ),
+                &r.stats,
+            ));
         }
 
         // (B) Mirror sees only ARP/broadcast — almost no unicast reaches the sniffer.
@@ -1066,14 +1126,15 @@ fn build_notices(r: &mut Report) {
             let uni_pct = r.stats.unicast as f64 * 100.0 / r.stats.decoded as f64;
             let noise_pct = noise as f64 * 100.0 / r.stats.decoded as f64;
             if uni_pct < 2.0 && noise_pct > 90.0 {
-                r.notices.push(Notice {
-                    code: "mirror_no_unicast",
-                    title: "Almost no unicast — mirror likely not seeing switched traffic".into(),
-                    text: format!(
-                        "Only {:.0}% of frames are unicast; {:.0}% are ARP/broadcast/multicast. The sniffer is seeing discovery noise but not the switched unicast conversations — a virtual bridge (Proxmox/ESXi/Hyper-V) is eating the mirror frames, hardware offload is bypassing the sniffer, or the mirror source is wrong. Verify with a bare laptop + Wireshark before trusting the sensor. [Source: packet-foo.com; Security Onion; forum consensus]",
+                r.notices.push(Notice::new(
+                    "mirror_no_unicast",
+                    "Almost no unicast — mirror likely not seeing switched traffic",
+                    format!(
+                        "Only {:.0}% of frames are unicast; {:.0}% are ARP/broadcast/multicast. The sniffer is seeing discovery noise but not the switched unicast conversations — a virtual bridge (Proxmox/ESXi/Hyper-V) is eating the mirror frames, hardware offload is bypassing the sniffer, or the mirror source is wrong. Verify with a bare laptop + Wireshark before trusting the sensor.",
                         uni_pct, noise_pct
                     ),
-                });
+                    &r.stats,
+                ));
             }
         }
     }
@@ -1081,23 +1142,25 @@ fn build_notices(r: &mut Report) {
     // (D) Timestamp discontinuity — a big forward jump means merged/replayed
     // captures (timing unreliable) or, if astronomical, a broken capture clock.
     if r.stats.ts_maxgap > 315_360_000.0 {
-        r.notices.push(Notice {
-            code: "timestamps_implausible",
-            title: "Implausible timestamps (broken capture clock)".into(),
-            text: format!(
-                "Consecutive frames jump by {:.0} years — the capture clock is wrong (e.g. a hardware-timestamping TAP whose dissector plugin is missing, so timestamps read as billions of seconds). Timing analysis is meaningless until the source is fixed. [Source: packet-foo Frame Timestamps; Profitap ProfiShark KB]",
+        r.notices.push(Notice::new(
+            "timestamps_implausible",
+            "Implausible timestamps (broken capture clock)",
+            format!(
+                "Consecutive frames jump by {:.0} years — the capture clock is wrong (e.g. a hardware-timestamping TAP whose dissector plugin is missing, so timestamps read as billions of seconds). Timing analysis is meaningless until the source is fixed.",
                 r.stats.ts_maxgap / 31_536_000.0
             ),
-        });
+            &r.stats,
+        ));
     } else if r.stats.ts_maxgap > 86_400.0 {
-        r.notices.push(Notice {
-            code: "timestamps_discontinuous",
-            title: "Timestamp discontinuity (merged/replayed capture)".into(),
-            text: format!(
-                "A {:.0}-day gap splits this capture — it is almost certainly a merge/replay of separate recordings, not one continuous capture. Timing rules and any temporal baseline are unreliable; analyse the segments separately. [Source: packet-foo Multi-Point Capture; mergecap(1)]",
+        r.notices.push(Notice::new(
+            "timestamps_discontinuous",
+            "Timestamp discontinuity (merged/replayed capture)",
+            format!(
+                "A {:.0}-day gap splits this capture — it is almost certainly a merge/replay of separate recordings, not one continuous capture. Timing rules and any temporal baseline are unreliable; analyse the segments separately.",
                 r.stats.ts_maxgap / 86_400.0
             ),
-        });
+            &r.stats,
+        ));
     }
     // a quality notice downgrades a clean ACCEPT to REVIEW
     if !r.notices.is_empty() && r.intake == "ACCEPT" {
@@ -1147,13 +1210,147 @@ fn finding_source(label: &str) -> &'static str {
     }
 }
 
+impl Notice {
+    /// Build a notice, attaching the real frame numbers gathered for this `code`
+    /// plus its plain-language explanation and verifiable sources.
+    fn new(
+        code: &'static str,
+        title: impl Into<String>,
+        text: impl Into<String>,
+        s: &Stats,
+    ) -> Notice {
+        Notice {
+            code,
+            title: title.into(),
+            text: text.into(),
+            explain: notice_explain(code).trim().into(),
+            frames: s.evidence.get(code).cloned().unwrap_or_default(),
+            sources: notice_sources(code),
+        }
+    }
+}
+
+/// Plain-language "what this means / why it matters / what to do" for each
+/// finding — written for a reviewer who is not a packet-capture specialist.
+/// The specific numbers stay in `text`; the exact frames are attached separately.
+fn notice_explain(code: &str) -> &'static str {
+    match code {
+        "span_double_capture" => "\
+What it means: the same packet appears in the file twice, only microseconds apart. This happens when a switch SPAN/mirror port is set to copy BOTH the incoming and the outgoing direction, so every packet is recorded once on the way in and once on the way out.
+Why it matters: Wireshark and most tools read the second copy as a TCP retransmission, so the capture looks like it has packet loss and retransmits that never happened on the real network. You can end up chasing a problem that is only an artifact of how the capture was taken.
+How to tell it apart from a real retransmit: a genuine retransmit arrives at least one round-trip-timeout later (tens of milliseconds) and carries a fresh IP identification field. These copies are byte-for-byte identical and fall inside a 5 ms window.
+What to do: set the mirror source to one direction only (RX-only or TX-only), or de-duplicate the file afterwards with editcap -d. The frames listed below are the duplicated copies.",
+        "offload_superframes" => "\
+What it means: some frames are far larger than a real Ethernet frame can be (over 1518 bytes, sometimes tens of kilobytes). No physical link can carry a frame that big — it appears because the capture was taken on one of the talking machines itself, where the network card's offload features (TSO/GSO/GRO/LRO) hand the capture library one giant pseudo-frame instead of the many small frames that actually went on the wire.
+Why it matters: the file no longer shows the real packet boundaries. An intrusion-detection system that reassembles the exact on-wire segments (Snort, Suricata, Zeek) can be fooled — the classic insertion/evasion problem — and your size and timing statistics are wrong.
+What to do: capture from a network TAP or a mirror port instead of on the endpoint, or turn offload off on the capture card (ethtool -K <if> gso off gro off tso off lro off). The oversized frames are listed below.",
+        "vxlan_legacy_port" => "\
+What it means: this capture carries VXLAN tunnel traffic, but on UDP port 8472 instead of the official port 4789. Port 8472 is the old Linux / Open vSwitch / flannel default from before the standard was finalised.
+Why it matters: many analysers only look for VXLAN on 4789 by default (Wireshark, Suricata, Zeek). On this file they would see one big meaningless UDP flow and completely miss the real hosts hidden inside the tunnel.
+What to do: tell your analyser to treat port 8472 as VXLAN as well, or re-encapsulate on 4789. The tunnel frames are listed below.",
+        "vxlan_rfc7348_iflag" => "\
+What it means: every VXLAN packet carries a small header, and one bit in it — the 'I' (VNI-valid) flag — MUST be 1 for the tunnel identifier to count. In these frames it is 0, which RFC 7348 section 5 does not allow.
+Why it matters: a strict decoder is permitted to drop these frames, which would hide every host inside the tunnel from your analysis; a relaxed decoder keeps them. Different tools will therefore disagree about what is in the file.
+What to do: check the device building the tunnel. The malformed frames are listed below.",
+        "inner_truncation" => "\
+What it means: inside these packets the IP header says the packet is longer than the bytes that were actually saved — part of each packet is missing from the file.
+Why it matters: anything that needs the whole packet (reassembling a TCP stream, extracting a file from the capture, matching intrusion-detection signatures on the payload) is working on incomplete data and can silently give the wrong answer.
+Why it happens: either the capture used a snap length shorter than the packet (-s set too low), or a tunnel/mirror path had a smaller MTU than the traffic (VXLAN adds ~50 bytes, ERSPAN ~50-62), so the end of each packet was cut off.
+What to do: recapture with full frames (-s 0) and raise the MTU on the mirror path above the tunnel overhead. The truncated packets are listed below.",
+        "mirror_no_unicast" => "\
+What it means: almost everything in this file is broadcast, multicast or ARP — the background noise of a network — and there is almost no one-to-one (unicast) conversation. A healthy mirror shows the opposite.
+Why it matters: it usually means the sniffer is plugged in somewhere that only sees the noise, not the actual switched traffic. Common causes: a virtual switch (Proxmox/ESXi/Hyper-V) is not forwarding the mirror, hardware offload is bypassing the sniffer, or the mirror is configured on the wrong source port.
+What to do: confirm with a plain laptop and Wireshark at the same tap point before trusting anything this sensor reports.",
+        "timestamps_discontinuous" => "\
+What it means: the clock inside the file jumps forward by more than a day between two neighbouring packets. A single continuous capture never does that — this file is almost certainly several separate recordings merged (or replayed) into one.
+Why it matters: any analysis that depends on timing — rates, gaps, 'what happened just before X' — is unreliable across that seam.
+What to do: split the file at the jump and analyse each part on its own. The frame below is where the jump happens.",
+        "timestamps_implausible" => "\
+What it means: the time between two neighbouring packets is measured in years, which is impossible for a real capture. The capture clock is broken — often a hardware-timestamping TAP whose decoder plugin is missing, so the raw timestamp is read as billions of seconds.
+Why it matters: every time-based number in this file is meaningless until the clock source is fixed.
+What to do: fix or remove the timestamping source and recapture. The frame below is where the impossible jump appears.",
+        "loopback_on_wire" => "\
+What it means: some packets use a loopback address — 127.something (IPv4) or ::1 (IPv6) — as their source or destination. Loopback is the address a machine uses to talk to itself; it physically never leaves the host and can never appear on a real network cable. So its presence here proves the capture was NOT taken on the network you were aiming at.
+Why it matters: you are almost certainly looking at traffic recorded on a host's own loopback interface, or exported from an appliance (a Barracuda CloudGen/NG firewall is the classic case) that captured its internal interface instead of the wire. The vantage point is wrong: hosts that should be talking may look silent, and the 127.x/::1 flows are internal service chatter, not network traffic. It also poisons correlation: every host's 127.0.0.1 is the same string, so anything that treats an IP as an identity will merge unrelated machines.
+What to do: recapture from a TAP or a switch SPAN/mirror of the actual segment, not on the box. If the file came from an appliance's diagnostic capture, pick the external/data interface, not the internal/loopback one. The frames below are the loopback ones.",
+        _ => "",
+    }
+}
+
+/// Verifiable authorities behind each finding — RFC clause, vendor doc, or the
+/// canonical paper — so a reviewer can check the reasoning independently.
+fn notice_sources(code: &str) -> Vec<(&'static str, &'static str)> {
+    match code {
+        "span_double_capture" => vec![
+            ("RFC 9293 (TCP)", "§3.8.1 — retransmission is driven by the retransmission timer (≥ one RTO), never microseconds later"),
+            ("Wireshark User's Guide", "Expert Information — 'Duplicate ACK' / 'Retransmission' raised by both-direction SPAN copies"),
+            ("Gigamon / Keysight", "SPAN & TAP de-duplication application notes"),
+            ("editcap(1)", "-d / -D / -w — duplicate-frame removal within a time window"),
+        ],
+        "offload_superframes" => vec![
+            ("Wireshark Wiki", "CaptureSetup/Offloading — TSO/GRO deliver over-MTU pseudo-frames on the capture host"),
+            ("Ptacek & Newsham (1998)", "Insertion, Evasion, and Denial of Service: Eluding Network Intrusion Detection"),
+            ("Suricata Documentation", "High Performance / Packet Capture — disable NIC offload before capturing"),
+            ("ethtool(8)", "-K <if> gso off gro off tso off lro off"),
+        ],
+        "vxlan_legacy_port" => vec![
+            ("RFC 7348 (VXLAN)", "§5 — Destination Port is the IANA-assigned UDP 4789"),
+            ("IANA Service Name & Transport Protocol Port Registry", "vxlan = 4789/udp (8472 is the pre-standard Linux default)"),
+            ("Suricata / Zeek", "default VXLAN decode port = 4789"),
+        ],
+        "vxlan_rfc7348_iflag" => vec![
+            ("RFC 7348 (VXLAN)", "§5 — 'the I flag MUST be set to 1 ... the remaining ... bits ... are reserved and MUST be zero'"),
+        ],
+        "inner_truncation" => vec![
+            ("tcpdump(1)", "-s snaplen (0 = full frame); a short snaplen truncates payload"),
+            ("RFC 7348 (VXLAN)", "§5 — the transport network MTU must exceed the inner frame plus ~50 B of VXLAN overhead"),
+            ("SANS Internet Storm Center", "Diary — the perils of capturing with a small snaplen"),
+        ],
+        "mirror_no_unicast" => vec![
+            ("Wireshark Wiki", "CaptureSetup/Ethernet — switched networks and port-mirroring pitfalls"),
+            ("Security Onion Documentation", "Sniffing — verifying the tap actually sees switched traffic"),
+        ],
+        "timestamps_discontinuous" => vec![
+            ("pcapng specification", "Enhanced Packet Block — per-packet timestamps (opsawg draft)"),
+            ("mergecap(1)", "merged captures append/interleave separate timelines"),
+        ],
+        "timestamps_implausible" => vec![
+            ("pcapng specification", "Interface Description Block — if_tsresol; a wrong resolution yields absurd times"),
+            ("packet-foo.com", "Frame timestamps & missing hardware-timestamp decoder plugins"),
+        ],
+        "loopback_on_wire" => vec![
+            ("RFC 1122 (Host Requirements)", "§3.2.1.3 (g) — 127.0.0.0/8 is the internal host loopback address and MUST NOT appear outside a host"),
+            ("RFC 6890 (Special-Purpose Registry)", "127.0.0.0/8 Loopback — not forwarded, not global, not source/destination on a link"),
+            ("RFC 4291 (IPv6 Addressing)", "§2.5.3 — the ::1 Loopback Address must never be sent on a link or forwarded by a router"),
+            ("IANA IPv4 Special-Purpose Address Registry", "127.0.0.0/8 — Forwardable: False, Globally Reachable: False"),
+        ],
+        _ => vec![],
+    }
+}
+
+/// Record that finding `code` was observed at the current frame. Keeps only the
+/// first `EV_CAP` frame numbers per finding so a reviewer can jump straight to
+/// real evidence in the capture without unbounded memory growth.
+const EV_CAP: usize = 12;
+fn note_ev(s: &mut Stats, code: &'static str) {
+    if s.cur_frame == 0 {
+        return;
+    }
+    let v = s.evidence.entry(code).or_default();
+    if v.len() < EV_CAP && v.last() != Some(&s.cur_frame) {
+        v.push(s.cur_frame);
+    }
+}
+
 /// Tally on-wire frame length anomalies (runt = below the 60 B Ethernet floor,
 /// oversize = above the 1518 B standard MTU) — a capture/L2 usability signal.
 fn note_framelen(s: &mut Stats, origlen: u32) {
     if origlen < 60 {
         s.runts += 1;
+        note_ev(s, "runts");
     } else if origlen > 1518 {
         s.oversize += 1;
+        note_ev(s, "offload_superframes");
     }
 }
 
@@ -1167,6 +1364,13 @@ fn note_ts(s: &mut Stats, ts: f64) {
         let gap = ts - prev;
         if gap > s.ts_maxgap {
             s.ts_maxgap = gap;
+        }
+        // Record the frame at any day-plus jump so the reviewer can see exactly
+        // where the capture was stitched together.
+        if gap > 315_360_000.0 {
+            note_ev(s, "timestamps_implausible");
+        } else if gap > 86_400.0 {
+            note_ev(s, "timestamps_discontinuous");
         }
     }
     s.ts_prev = Some(ts);
@@ -1536,6 +1740,34 @@ fn markdown_report(name: &str, sha: &str, r: &Report) -> String {
                 n.code,
                 n.text
             );
+            if !n.explain.is_empty() {
+                // plain-language explanation, one bullet per sentence-block line
+                for line in n.explain.lines() {
+                    let _ = writeln!(o, "> {line}");
+                }
+                let _ = writeln!(o);
+            }
+            if !n.frames.is_empty() {
+                let list = n
+                    .frames
+                    .iter()
+                    .map(|f| f.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let _ = writeln!(
+                    o,
+                    "**Where in this capture** — example frame{}: {}\n",
+                    if n.frames.len() > 1 { "s" } else { "" },
+                    list
+                );
+            }
+            if !n.sources.is_empty() {
+                let _ = writeln!(o, "**Sources**");
+                for (a, c) in &n.sources {
+                    let _ = writeln!(o, "- {a} — {c}");
+                }
+                let _ = writeln!(o);
+            }
         }
     }
     let _ = writeln!(o, "## 3  Packet distribution\n");
@@ -1873,6 +2105,22 @@ fn run_cli(path: &str) -> i32 {
         for n in &r.notices {
             println!("   ⚠ {} [{}]", n.title, n.code);
             println!("     {}", n.text);
+            if !n.frames.is_empty() {
+                let list = n
+                    .frames
+                    .iter()
+                    .map(|f| f.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                println!(
+                    "     ↦ seen at frame{}: {}",
+                    if n.frames.len() > 1 { "s" } else { "" },
+                    list
+                );
+            }
+            for (a, c) in &n.sources {
+                println!("     ↪ {a} — {c}");
+            }
         }
     }
 
@@ -1942,11 +2190,26 @@ async fn check(mut mp: axum::extract::Multipart) -> axum::response::Response {
         .notices
         .iter()
         .map(|n| {
+            let frames = n
+                .frames
+                .iter()
+                .map(|f| f.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sources = n
+                .sources
+                .iter()
+                .map(|(a, c)| format!("{{\"authority\":{},\"cite\":{}}}", json_str(a), json_str(c)))
+                .collect::<Vec<_>>()
+                .join(",");
             format!(
-                "{{\"code\":\"{}\",\"title\":{},\"text\":{}}}",
+                "{{\"code\":\"{}\",\"title\":{},\"text\":{},\"explain\":{},\"frames\":[{}],\"sources\":[{}]}}",
                 n.code,
                 json_str(&n.title),
-                json_str(&n.text)
+                json_str(&n.text),
+                json_str(&n.explain),
+                frames,
+                sources
             )
         })
         .collect::<Vec<_>>()
@@ -2401,6 +2664,41 @@ mod tests {
     }
 
     #[test]
+    fn loopback_on_wire_detected() {
+        // A frame with a 127.0.0.0/8 destination (127.0.0.1). Loopback can never
+        // cross a link (RFC 1122 §3.2.1.3), so this must raise loopback_on_wire
+        // and record the offending frame — the Barracuda/appliance capture case.
+        let mut ip = vec![0x45, 0x00];
+        ip.extend(40u16.to_be_bytes());
+        ip.extend([0, 0, 0x40, 0x00, 0x40, 6, 0, 0]);
+        ip.extend([10, 0, 0, 5]); // src 10.0.0.5
+        ip.extend([127, 0, 0, 1]); // dst 127.0.0.1 (loopback on the wire)
+        ip.extend(tcp_seg(1234, 80, 1, 0, 0x02, &[]));
+        let frame = eth(M2, M1, 0x0800, &ip);
+        let r = analyze(&pcap(&[(1u32, 0u32, frame)]));
+        assert_eq!(r.stats.loopback_frames, 1, "127.0.0.1 must be flagged");
+        let n = r
+            .notices
+            .iter()
+            .find(|n| n.code == "loopback_on_wire")
+            .expect("loopback_on_wire notice must fire");
+        assert_eq!(n.frames, vec![1], "must point at the loopback frame");
+        assert!(!n.sources.is_empty(), "must cite RFC 1122");
+        // a clean non-loopback capture must NOT trip it
+        let clean = eth(M2, M1, 0x0800, &{
+            let mut c = vec![0x45, 0x00];
+            c.extend(40u16.to_be_bytes());
+            c.extend([0, 0, 0x40, 0x00, 0x40, 6, 0, 0]);
+            c.extend([10, 0, 0, 5]);
+            c.extend([10, 0, 0, 6]);
+            c.extend(tcp_seg(1234, 80, 1, 0, 0x02, &[]));
+            c
+        });
+        let rc = analyze(&pcap(&[(1u32, 0u32, clean)]));
+        assert_eq!(rc.stats.loopback_frames, 0, "no false positive on 10.0.0.6");
+    }
+
+    #[test]
     fn inner_length_truncation() {
         // IP total-length claims 200 B but only a 20 B TCP header is present.
         let mut ip = vec![0x45, 0x00];
@@ -2541,11 +2839,45 @@ mod tests {
         // Every notice text is valid UTF-8 (String guarantees it); the U+FFFD
         // replacement char would signal a decoding break upstream.
         for n in &r.notices {
+            for field in [&n.text, &n.explain] {
+                assert!(
+                    !field.contains('\u{FFFD}'),
+                    "notice {} contains a replacement char",
+                    n.code
+                );
+            }
+        }
+        // Evidence-not-claims: findings that point at specific frames must carry
+        // real frame numbers from THIS capture, plus a plain-language explanation
+        // and at least one verifiable source.
+        for n in &r.notices {
             assert!(
-                !n.text.contains('\u{FFFD}'),
-                "notice {} contains a replacement char",
+                !n.explain.is_empty(),
+                "notice {} has no plain-language explanation",
                 n.code
             );
+            assert!(!n.sources.is_empty(), "notice {} cites no source", n.code);
+            // per-frame findings must show where they were seen
+            if matches!(
+                n.code,
+                "span_double_capture"
+                    | "offload_superframes"
+                    | "vxlan_legacy_port"
+                    | "vxlan_rfc7348_iflag"
+                    | "inner_truncation"
+                    | "timestamps_discontinuous"
+            ) {
+                assert!(
+                    !n.frames.is_empty(),
+                    "notice {} must list the frames where it was found",
+                    n.code
+                );
+                assert!(
+                    n.frames.iter().all(|&f| f >= 1 && f <= r.packets as u64),
+                    "notice {} frame numbers out of range",
+                    n.code
+                );
+            }
         }
     }
 

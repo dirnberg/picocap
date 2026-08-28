@@ -3,6 +3,37 @@
 Every shipped change to what PicoCap detects or how it runs, newest first.
 Each entry is backed by `cargo test` and a semantic version bump in `Cargo.toml`.
 
+## v1.5.0 "Bloodhound" — 2026-08-28
+
+**Traceable evidence per finding + loopback-on-the-wire detection.**
+
+Every capture-quality notice now carries three things beyond its one-line summary,
+surfaced identically in the CLI, JSON API, Markdown report and GUI (expandable
+`<details>` panels):
+
+1. **Exact frames** — the real 1-based frame numbers in *this* capture where the
+   finding was observed (capped at 12 per finding, gathered during the single
+   analysis pass via a `cur_frame` cursor + per-code evidence map, so memory stays
+   flat). Evidence, not a bare count.
+2. **Plain-language explanation** — *what it means / why it matters / what to do*,
+   written for a reviewer who is not a packet-capture specialist.
+3. **Verifiable sources** — `(authority, exact clause)` pairs (RFC §, IANA registry,
+   vendor doc, or the canonical paper), replacing the old inline `[Source: …]`.
+
+**New finding — `loopback_on_wire`.** `127.0.0.0/8` (IPv4) or `::1` (IPv6) as source
+or destination. A hard RFC 1122 §3.2.1.3 invariant: loopback MUST NOT appear outside
+a host, so even one such frame proves the capture came from a host's loopback or an
+appliance's internal interface — the classic case being a **Barracuda** CloudGen/NG
+diagnostic export that recorded the box's internal interface instead of the network
+segment. Zero-false-positive by construction (unlike threshold heuristics); checks
+the inner L3 header so it works through tunnels. Downgrades ACCEPT → REVIEW.
+
+A new CI guard asserts every per-frame finding on the demo fixture ships real,
+in-range frame numbers plus a non-empty explanation and at least one source — so the
+evidence layer cannot silently regress to counts.
+
+Tests: 20 → 23 (loopback positive+negative, evidence-populated demo assertions).
+
 ## v1.4.0 "Staghound" — 2026-08-27
 
 **Egress-tag artifact on the double-capture finding.** A measure-first feature: a

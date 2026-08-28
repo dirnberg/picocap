@@ -3,7 +3,7 @@
 **The tiny PCAP / PCAPNG capture intake checker.**
 
 [![CI](https://github.com/dirnberg/picocap/actions/workflows/ci.yml/badge.svg)](https://github.com/dirnberg/picocap/actions/workflows/ci.yml)
-![version](https://img.shields.io/badge/version-1.4.0%20%22Staghound%22-19e0d8)
+![version](https://img.shields.io/badge/version-1.5.0%20%22Bloodhound%22-19e0d8)
 ![license](https://img.shields.io/badge/license-MIT-blue)
 ![built with](https://img.shields.io/badge/built%20with-Rust-orange)
 
@@ -12,9 +12,12 @@
 > the file against the PCAP Collection Guide, scores its conformance, breaks down the
 > packet distribution and encapsulation (VLAN, GRE/ERSPAN/VXLAN), and flags the
 > mistakes that quietly ruin OT captures — **SPAN double-capture (TX + RX)**,
-> **dropped segments** (sequence gaps + ACKed-unseen), and **one-directional
-> captures**. Multi-GB files stream from disk. Every finding cites a source, and
-> nothing leaves the machine. Read-only: it never rewrites or forwards the file.
+> **dropped segments** (sequence gaps + ACKed-unseen), **one-directional
+> captures**, and **loopback addresses on the wire** (127.0.0.0/8 / ::1 — a
+> host-local or appliance capture, not the network). Multi-GB files stream from
+> disk. **Every finding is expandable to the exact frame numbers where it was
+> found, a plain-language explanation, and verifiable RFC/vendor sources.**
+> Nothing leaves the machine. Read-only: it never rewrites or forwards the file.
 
 PicoCap takes **one** capture and answers a single question: *is this capture good
 enough to work with?* It verifies the file against the **PCAP Collection Guide**
@@ -51,12 +54,19 @@ Pure Rust, no `libpcap`, no system dependencies. CLI + a self-contained web GUI.
 - **Frame-length anomalies** — runt / oversize / **NIC-offload super-frames** (TSO/GRO)
 - **Encapsulation RFC conformance** — inner-length truncation, **VXLAN on legacy UDP
   8472** (vs RFC 7348 port 4789), and **malformed VXLAN headers** (RFC 7348 §5 violation)
+- **Loopback on the wire** — `127.0.0.0/8` or `::1` as source/destination, which per
+  RFC 1122 §3.2.1.3 can never cross a link: a definitive sign the file was captured on
+  a host's loopback or an appliance's internal interface (e.g. a **Barracuda** diagnostic
+  export), not on the network segment you meant to record
 - **Capture metadata** — recording start/end (UTC), duration, pcap version, byte
   order, timestamp precision, link type, throughput, avg packet size
 
-Verdict is one of **ACCEPT · REVIEW · REJECT**. Every criterion cites an
-authoritative **source** (RFC / Wireshark / Zeek / packet-foo / SANS ISC) — in the
-JSON, the report and the GUI — see [`docs/CHECKS.md`](docs/CHECKS.md). Multi-GB
+Verdict is one of **ACCEPT · REVIEW · REJECT**. Every finding is backed by
+**evidence, not claims**: it expands to the **exact frame numbers** where it was seen
+in *this* capture, a **plain-language explanation** (what it means / why it matters /
+what to do), and **verifiable sources** with the precise clause (RFC / Wireshark /
+Zeek / IANA / packet-foo / SANS ISC) — in the CLI, the JSON, the report and the GUI —
+see [`docs/CHECKS.md`](docs/CHECKS.md). Multi-GB
 captures **stream from disk** (tested to 5.5 GB, ~flat memory). Processing is
 **local only**: no cloud, and every report carries a trust note.
 
@@ -74,7 +84,7 @@ picocap capture.pcap              # text summary + verdict (exit 0/1/2)
 picocap --report capture.pcap     # full Markdown assessment report → stdout
 picocap --report big.pcapng > big-assessment.md
 picocap serve                     # start the web GUI (see below)
-picocap --version                 # picocap 1.4.0 "Staghound"
+picocap --version                 # picocap 1.5.0 "Bloodhound"
 ```
 
 `--report` has no size limit, so it also handles multi-GB captures the GUI upload
@@ -105,10 +115,10 @@ docker compose up -d
 # or plain docker, hardened, localhost-only, with a token
 docker run --rm -p 127.0.0.1:8088:8088 -e PICOCAP_TOKEN=<token> \
   --read-only --cap-drop ALL --security-opt no-new-privileges --tmpfs /tmp \
-  picocap:1.4.0
+  picocap:1.5.0
 
 # CLI inside the container (read-only mount)
-docker run --rm -v "$PWD:/d:ro" picocap:1.4.0 /d/capture.pcap
+docker run --rm -v "$PWD:/d:ro" picocap:1.5.0 /d/capture.pcap
 ```
 
 ## Configuration — `picocap.yml`
@@ -166,6 +176,21 @@ hand.
 ## Releases
 
 Full notes: [GitHub Releases](https://github.com/dirnberg/picocap/releases). Change log: [`EVOLUTION.md`](EVOLUTION.md).
+
+### v1.5.0 — "Bloodhound" (2026-08-28)
+Turns every finding into **traceable evidence**. Each capture-quality notice now
+expands to (1) the **exact frame numbers** where it was observed in *this* file,
+(2) a **plain-language explanation** — what it means, why it matters, what to do,
+written for a non-specialist, and (3) **verifiable sources** with the precise clause
+(RFC §, IANA registry, vendor doc, or the canonical paper). Surfaced consistently in
+the CLI, the JSON API, the Markdown report and the GUI (expandable panels). Adds a
+new finding, **loopback on the wire** (`127.0.0.0/8` / `::1` as source or
+destination): a hard RFC 1122 §3.2.1.3 invariant — loopback can never cross a link —
+so its presence proves a **host-local or appliance capture** (the classic case: a
+**Barracuda** CloudGen/NG diagnostic export that recorded the box's internal
+interface, not the network). A CI guard asserts every per-frame finding carries real,
+in-range frame numbers plus an explanation and a source, so evidence can't silently
+regress to bare counts.
 
 ### v1.4.0 — "Staghound" (2026-08-27)
 Adds the **egress-tag artifact** to the SPAN double-capture finding: when the two

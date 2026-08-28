@@ -16,7 +16,7 @@ them, writes nothing to disk when serving, and has no system dependencies.
   git-ignored so it is never committed.
 - **Docker:** run unprivileged and read-only, and bind only to localhost:
   `docker run -p 127.0.0.1:8088:8088 -e PICOCAP_TOKEN=… --read-only --cap-drop ALL
-  --security-opt no-new-privileges --tmpfs /tmp picocap:1.4.0`.
+  --security-opt no-new-privileges --tmpfs /tmp picocap:1.5.0`.
 
 ## Reporting a vulnerability
 

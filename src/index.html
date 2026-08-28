@@ -87,6 +87,18 @@ body::before{content:"";position:fixed;inset:0;pointer-events:none;z-index:0;opa
 .notice .ic{font-size:20px}.notice h3{margin:0 0 3px;font-size:14px;color:var(--warn)}
 .notice p{margin:0;font-size:12.5px;color:#c7d6dd;line-height:1.5}
 .notice code{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--warn);opacity:.8}
+.notice details{margin-top:9px}
+.notice summary{cursor:pointer;font-size:11px;letter-spacing:.4px;text-transform:uppercase;color:var(--warn);opacity:.85;list-style:none;user-select:none}
+.notice summary::-webkit-details-marker{display:none}
+.notice summary::before{content:"▸ ";font-size:10px}
+.notice details[open] summary::before{content:"▾ "}
+.notice .explain{margin:9px 0 4px;font-size:12.5px;color:#d6e3e9;line-height:1.6}
+.notice .explain b{color:#eaf3f6;font-weight:600}
+.notice .where{margin:8px 0;padding:8px 10px;border-radius:8px;background:rgba(255,178,62,.08);border:1px solid rgba(255,178,62,.25);font-size:12px;color:#e8dcc4}
+.notice .where .fr{font-family:ui-monospace,Menlo,monospace;color:var(--warn)}
+.notice .srcs{margin:8px 0 0;padding:0;list-style:none;font-size:11.5px;color:var(--mut);line-height:1.6}
+.notice .srcs li{padding-left:14px;text-indent:-14px}
+.notice .srcs .au{color:#bcd; font-weight:600}
 .clean{display:flex;align-items:center;gap:9px;padding:12px 15px;border-radius:12px;border:1px solid var(--line);color:var(--ok);font-size:13px;background:var(--panel2)}
 .chk{display:flex;gap:12px;align-items:flex-start;padding:8px 2px;border-bottom:1px solid rgba(23,48,58,.5)}
 .chk:last-child{border-bottom:none}
@@ -271,8 +283,16 @@ function detailHTML(d,when){
  const subs={ACCEPT:'Meets the collection criteria',REVIEW:'Usable — see notices below',REJECT:'Do not use — fix and recapture'};
  const off=CIRC*(1-d.conformance/100);
  const mk={pass:'✓',warn:'!',fail:'✕',info:'i'};
+ const fmtExplain=t=>esc(t).split('\n').map(l=>{const i=l.indexOf(':');return (i>0&&i<42)?`<b>${l.slice(0,i+1)}</b>${l.slice(i+1)}`:l;}).join('<br>');
+ const renderNotice=n=>{
+  const frames=(n.frames&&n.frames.length)?`<div class="where">Where in this capture — example frame${n.frames.length>1?'s':''}: <span class="fr">${n.frames.join(', ')}</span></div>`:'';
+  const srcs=(n.sources&&n.sources.length)?`<ul class="srcs">${n.sources.map(s=>`<li>↪ <span class="au">${esc(s.authority)}</span> — ${esc(s.cite)}</li>`).join('')}</ul>`:'';
+  const body=(n.explain?`<div class="explain">${fmtExplain(n.explain)}</div>`:'')+frames+srcs;
+  const det=body?`<details><summary>Why this matters · where it was found · sources</summary>${body}</details>`:'';
+  return `<div class="notice"><div class="ic">⚠</div><div style="flex:1;min-width:0"><h3>${esc(n.title)} <code>${esc(n.code)}</code></h3><p>${esc(n.text)}</p>${det}</div></div>`;
+ };
  const notices=(d.notices&&d.notices.length)
-  ?d.notices.map(n=>`<div class="notice"><div class="ic">⚠</div><div><h3>${esc(n.title)} <code>${esc(n.code)}</code></h3><p>${esc(n.text)}</p></div></div>`).join('')
+  ?d.notices.map(renderNotice).join('')
   :`<div class="clean">✓ No capture-quality notices — traffic looks clean</div>`;
  const checks=d.checks.map(c=>`<div class="chk"><div class="mk ${c.level}">${mk[c.level]||'i'}</div><div><div class="lb">${esc(c.label)}</div><div class="dt">${esc(c.detail)}</div>${c.source?`<div class="src">↪ ${esc(c.source)}</div>`:''}</div></div>`).join('');
  const x=d.dist,cast=(x.unicast+x.multicast+x.broadcast)||1;

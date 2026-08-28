@@ -127,6 +127,33 @@ MTU cut the payload. Raise the mirror-path MTU above the encapsulation overhead
 (VXLAN +50 B, ERSPAN +50–62 B). **Source** RFC 7348 / ERSPAN draft-foschiano-erspan;
 `tcpdump(1)` snaplen; SANS ISC.
 
+### Loopback on the wire (host-local / appliance capture)
+A `127.0.0.0/8` (IPv4) or `::1` (IPv6) address appears as source or destination.
+Loopback is how a machine talks to *itself*; per **RFC 1122 §3.2.1.3** it MUST NOT
+appear outside a host, so it can never legitimately be on a network link. Its
+presence is therefore a definitive, zero-false-positive sign that the file was
+recorded on a host's loopback interface — or exported from an appliance that captured
+its **internal** interface rather than the wire. The classic case is a **Barracuda**
+CloudGen/NG firewall diagnostic PCAP: the box's internal service chatter (127.x) ends
+up in a file the analyst assumes is network traffic. The vantage point is wrong and
+correlation is poisoned (every host's `127.0.0.1` is the same string). Recapture from
+a TAP/SPAN of the real segment, or pick the external/data interface on the appliance.
+**Source** RFC 1122 §3.2.1.3; RFC 6890; RFC 4291 §2.5.3 (`::1`); IANA IPv4
+Special-Purpose Address Registry.
+
+---
+
+## Evidence, not claims
+
+Every capture-quality notice is expandable to three things, identical across the CLI,
+the JSON API (`frames`, `explain`, `sources[]`), the Markdown report and the GUI:
+
+- **Exact frames** — the real frame numbers in *this* capture where the finding was
+  observed (first 12), so a reviewer can jump straight to the packets.
+- **Plain-language explanation** — *what it means / why it matters / what to do*.
+- **Verifiable sources** — the responsible authority and its **precise clause**, so
+  the reasoning can be checked independently.
+
 ---
 
 ## Scope boundary — what PicoCap does **not** do
